@@ -1,4 +1,4 @@
-:set dotenv-load = true
+set dotenv-load := true
 
 _help:
 	just -l
@@ -7,20 +7,22 @@ _help:
 test:
 	cargo nextest run
 
-# Run the same checks we run in CI. Requires nightly.
-ci: test
-	cargo clippy
+# Run the nightly formatter
+fmt:
 	cargo +nightly fmt
 
-# Ask for clippy's opinion.
+# Run the same checks we run in CI. Requires nightly.
+ci: test fmt
+	cargo clippy --all-targets
+
+# Auto-fix clippy complaints.
 lint:
-	cargo clippy --fix
-	cargo +nightly fmt
+	cargo clippy --fix --all-targets
 
 # Install required tools
 setup:
 	brew tap ceejbot/tap
-	brew install fzf cargo-nextest tomato semver-bump semver-bump
+	brew install fzf cargo-nextest tomato semver-bump
 	rustup install nightly
 
 # Tag a new version for release.
