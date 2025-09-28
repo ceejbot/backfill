@@ -1,0 +1,80 @@
+ {
+   "todos": [
+     { "id": "CD-0001", "content": "Verify Postgres version (>= 12) in target environments", "status": "pending", "priority": "high" },
+     { "id": "CD-0002", "content": "Confirm DB permissions to create schema/tables and run migrations", "status": "pending", "priority": "high" },
+     { "id": "CD-0003", "content": "Decide and document Postgres schema name for Graphile Worker (graphile_worker)", "status": "pending", "priority": "high" },
+     { "id": "CD-0004", "content": "Document DATABASE_URL handling and secrets management", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-0101", "content": "Add graphile_worker crate dependency to Cargo.toml (latest stable)", "status": "pending", "priority": "high" },
+     { "id": "CD-0102", "content": "Ensure tokio, tracing, serde, serde_json, anyhow/thiserror, chrono, sqlx dependencies present", "status": "pending", "priority": "high" },
+     { "id": "CD-0103", "content": "Add worker binary target (e.g., backfill-worker) in Cargo.toml", "status": "pending", "priority": "high" },
+     { "id": "CD-0104", "content": "Validate clippy/rustfmt settings for new binary target", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-0201", "content": "Invoke Graphile Worker RS migrations at startup (schema graphile_worker)", "status": "pending", "priority": "high" },
+     { "id": "CD-0202", "content": "Add a migration runner path in non-prod and test environments", "status": "pending", "priority": "high" },
+     { "id": "CD-0203", "content": "CI: apply migrations before integration tests run", "status": "pending", "priority": "high" },
+     { "id": "CD-0204", "content": "Document migration process in README (how to run/rollback)", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-0301", "content": "Define named queues: fast, bulk, dead_letter", "status": "pending", "priority": "high" },
+     { "id": "CD-0302", "content": "Define priority bands: fast −10 (−20 for emergencies), bulk 0..+10 (lower number = higher priority)", "status": "pending", "priority": "high" },
+     { "id": "CD-0303", "content": "Define default retry policy: max_attempts=8 with exponential backoff schedule", "status": "pending", "priority": "high" },
+     { "id": "CD-0304", "content": "Document insert-at-front policy (very low priority + run_at=now)", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-0401", "content": "Design enqueue() helper signature and error types (includes job_key, run_at, priority)", "status": "pending", "priority": "high" },
+     { "id": "CD-0402", "content": "Implement enqueue() wrapper over Graphile Worker with job_key idempotency", "status": "pending", "priority": "high" },
+     { "id": "CD-0403", "content": "Add integration tests for enqueue() including job_key dedup semantics", "status": "pending", "priority": "high" },
+     { "id": "CD-0404", "content": "Provide convenience helpers: enqueue_fast(), enqueue_bulk()", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-0501", "content": "Scaffold backfill-worker binary with config loading (env)", "status": "pending", "priority": "high" },
+     { "id": "CD-0502", "content": "Register job handlers and task routing in worker", "status": "pending", "priority": "high" },
+     { "id": "CD-0503", "content": "Implement per-queue concurrency (fast/bulk) via config", "status": "pending", "priority": "high" },
+     { "id": "CD-0504", "content": "Implement error classification: retryable vs non-retryable with mapping to backoff/DLQ", "status": "pending", "priority": "high" },
+     { "id": "CD-0505", "content": "Implement graceful shutdown and worker heartbeat/lease behavior", "status": "pending", "priority": "medium" },
+     { "id": "CD-0506", "content": "(Optional) Expose health/ready endpoints for k8s/systemd integration", "status": "pending", "priority": "low" },
+
+     { "id": "CD-0601", "content": "Configure dead_letter named queue and standard DLQ metadata (last_error, attempts, timestamps)", "status": "pending", "priority": "high" },
+     { "id": "CD-0602", "content": "Publish to dead_letter when max_attempts exceeded or non-retryable error", "status": "pending", "priority": "high" },
+     { "id": "CD-0603", "content": "Provide CLI/admin function to re-enqueue jobs from DLQ after remediation", "status": "pending", "priority": "medium" },
+     { "id": "CD-0604", "content": "Integration test: DLQ flow and re-enqueue path", "status": "pending", "priority": "high" },
+
+     { "id": "CD-0701", "content": "Add tracing spans for claim/execute/ack with job_key, queue, priority, attempts", "status": "pending", "priority": "high" },
+     { "id": "CD-0702", "content": "Expose Prometheus metrics: queue depth, enqueue→start, duration, attempts, failures, DLQ counts, lag", "status": "pending", "priority": "high" },
+     { "id": "CD-0703", "content": "Implement structured logging fields and log levels", "status": "pending", "priority": "medium" },
+     { "id": "CD-0704", "content": "Create Grafana dashboard for queue health (latency, lag, throughput, DLQ)", "status": "pending", "priority": "medium" },
+     { "id": "CD-0705", "content": "Add alerts for lag, failure rate, and DLQ volume thresholds", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-0801", "content": "CI/test env: start Postgres via Docker and set DATABASE_URL", "status": "pending", "priority": "high" },
+     { "id": "CD-0802", "content": "Test: priority ordering and insert-front preemption", "status": "pending", "priority": "high" },
+     { "id": "CD-0803", "content": "Test: run_at scheduling and soft-deadline lag measurement", "status": "pending", "priority": "high" },
+     { "id": "CD-0804", "content": "Test: retries follow exponential backoff schedule", "status": "pending", "priority": "high" },
+     { "id": "CD-0805", "content": "Test: job_key idempotency ensures single execution", "status": "pending", "priority": "high" },
+     { "id": "CD-0806", "content": "Test: multi-queue isolation and per-queue concurrency limits", "status": "pending", "priority": "high" },
+     { "id": "CD-0807", "content": "Test: non-retryable error routes job to DLQ", "status": "pending", "priority": "high" },
+     { "id": "CD-0808", "content": "(Optional) Benchmark: LISTEN/NOTIFY vs polling dispatch latency", "status": "pending", "priority": "low" },
+     { "id": "CD-0809", "content": "Ensure tests wrap in transactions and roll back for cleanup", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-0901", "content": "Update .github/workflows/test.yaml to run Postgres service", "status": "pending", "priority": "high" },
+     { "id": "CD-0902", "content": "CI: run migrations before tests; set schema to graphile_worker", "status": "pending", "priority": "high" },
+     { "id": "CD-0903", "content": "CI: run cargo nextest for integration tests", "status": "pending", "priority": "high" },
+     { "id": "CD-0904", "content": "CI: ensure clippy and fmt pass with new code", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-1001", "content": "README: add worker usage, env config, and migration instructions", "status": "pending", "priority": "medium" },
+     { "id": "CD-1002", "content": "Add docs/operating-runbook.md for DLQ procedures and scaling guidance", "status": "pending", "priority": "medium" },
+     { "id": "CD-1003", "content": "Document metrics and Grafana dashboards for ongoing ops", "status": "pending", "priority": "low" },
+
+     { "id": "CD-1101", "content": "Non-prod rollout: deploy worker + minimal producer; backfill burst test", "status": "pending", "priority": "high" },
+     { "id": "CD-1102", "content": "Tune per-queue concurrency and downstream rate limits using metrics", "status": "pending", "priority": "high" },
+     { "id": "CD-1103", "content": "Staging validation of SLOs (lag, throughput, failure rate)", "status": "pending", "priority": "high" },
+     { "id": "CD-1104", "content": "Plan production rollout and rollback strategy; define guardrails", "status": "pending", "priority": "high" },
+     { "id": "CD-1105", "content": "Production rollout; monitor dashboards and alerts; capture learnings", "status": "pending", "priority": "high" },
+
+     { "id": "CD-1201", "content": "Audit dependency licenses; avoid AGPL unless explicitly approved", "status": "pending", "priority": "high" },
+     { "id": "CD-1202", "content": "Record third-party license notices if required", "status": "pending", "priority": "low" },
+
+     { "id": "CD-1301", "content": "Add monitoring for autovacuum/dead tuples on job tables", "status": "pending", "priority": "medium" },
+     { "id": "CD-1302", "content": "Draft partitioning/retention plan if job table growth is high (future)", "status": "pending", "priority": "low" },
+     { "id": "CD-1303", "content": "Configure DB pool sizes/timeouts appropriate for workers", "status": "pending", "priority": "medium" },
+
+     { "id": "CD-1401", "content": "(Future) Outline optional Redis/Apalis integration plan if throughput needs change", "status": "pending", "priority": "low" }
+   ]
+ }
