@@ -1,0 +1,22 @@
+[package]
+name = "backfill"
+version = "0.1.0"
+edition = "2024"
+description = "Describe it here."
+categories = ["concurrency", "data-structures"]
+authors = ["C J Silverio <ceejceej@gmail.com>"]
+readme = "README.md"
+license = "Parity-7.0.0"
+repository = "https://github.com/ceejbot/backfill"
+homepage = "https://github.com/ceejbot/backfill"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = { level = "deny", priority = 1 }
+future_incompatible = { level = "deny", priority = 2 }
+trivial_casts = { level = "warn", priority = 3 }
+rust_2018_idioms = { level = "warn", priority = 4 }
+
+[lints.clippy]
+unwrap_used = "deny"
