@@ -1,7 +1,7 @@
 //! # Backfill
 //!
-//! A high-performance, PostgreSQL-backed async priority queue system for Rust applications.
-//! Built on top of [Graphile Worker](https://github.com/graphile/worker) for reliability and performance.
+//! A high-performance, PostgreSQL-backed async priority queue system for Rust
+//! applications. Built on top of [Graphile Worker](https://github.com/graphile/worker) for reliability and performance.
 //!
 //! This library provides:
 //! - **Durable job queues** with PostgreSQL backend
@@ -50,18 +50,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use graphile_worker::{JobSpec as GraphileJobSpec, JobSpecBuilder, WorkerUtils, Job};
-use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
-
 // Re-export commonly used types from graphile_worker
-pub use graphile_worker::{
-    JobKeyMode, TaskHandler, WorkerContext, WorkerOptions, IntoTaskHandlerResult
-};
+pub use graphile_worker::{IntoTaskHandlerResult, JobKeyMode, TaskHandler, WorkerContext, WorkerOptions};
+use graphile_worker::{Job, JobSpec as GraphileJobSpec, JobSpecBuilder, WorkerUtils};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 /// Priority levels for jobs in the backfill system.
-/// 
+///
 /// Lower numbers indicate higher priority (closer to front of queue).
 /// Fast queue uses negative priorities, bulk queue uses positive priorities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -163,25 +160,23 @@ impl Default for JobSpec {
 impl From<JobSpec> for GraphileJobSpec {
     fn from(spec: JobSpec) -> Self {
         let mut builder = JobSpecBuilder::new();
-        
+
         if let Some(run_at) = spec.run_at {
             builder = builder.run_at(run_at);
         }
-        
-        builder = builder
-            .priority(spec.priority.into())
-            .queue_name(spec.queue.as_str());
-            
+
+        builder = builder.priority(spec.priority.into()).queue_name(spec.queue.as_str());
+
         if let Some(max_attempts) = spec.max_attempts {
             // Convert i32 to i16, clamping to avoid overflow
             let max_attempts_i16 = max_attempts.clamp(0, i16::MAX as i32) as i16;
             builder = builder.max_attempts(max_attempts_i16);
         }
-        
+
         if let Some(job_key) = spec.job_key {
             builder = builder.job_key(&job_key).job_key_mode(spec.job_key_mode);
         }
-        
+
         builder.build()
     }
 }
@@ -195,22 +190,17 @@ pub struct BackfillClient {
 impl BackfillClient {
     /// Create a new BackfillClient with the given database URL.
     ///
-    /// This will create a connection pool and initialize the GraphileWorker schema.
+    /// This will create a connection pool and initialize the GraphileWorker
+    /// schema.
     pub async fn new(database_url: &str) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(database_url)
-            .await?;
+        let pool = PgPoolOptions::new().max_connections(10).connect(database_url).await?;
 
         Self::with_pool_and_schema(pool, "graphile_worker".to_string()).await
     }
 
     /// Create a BackfillClient with the given database URL and custom schema.
     pub async fn new_with_schema(database_url: &str, schema: &str) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(database_url)
-            .await?;
+        let pool = PgPoolOptions::new().max_connections(10).connect(database_url).await?;
 
         Self::with_pool_and_schema(pool, schema.to_string()).await
     }
@@ -220,7 +210,8 @@ impl BackfillClient {
         Self::with_pool_and_schema(pool, "graphile_worker".to_string()).await
     }
 
-    /// Create a BackfillClient with an existing connection pool and custom schema.
+    /// Create a BackfillClient with an existing connection pool and custom
+    /// schema.
     pub async fn with_pool_and_schema(pool: PgPool, schema: String) -> Result<Self> {
         // Run migrations to ensure schema is set up
         graphile_worker::WorkerOptions::default()
@@ -228,7 +219,7 @@ impl BackfillClient {
             .pg_pool(pool.clone())
             .init()
             .await?;
-        
+
         Ok(Self { pool, schema })
     }
 
@@ -261,12 +252,10 @@ impl BackfillClient {
         T: Serialize,
     {
         let utils = self.utils();
-        let job = utils.add_raw_job(
-            task_identifier,
-            serde_json::to_value(payload)?,
-            spec.into(),
-        ).await?;
-        
+        let job = utils
+            .add_raw_job(task_identifier, serde_json::to_value(payload)?, spec.into())
+            .await?;
+
         Ok(job)
     }
 
@@ -307,7 +296,8 @@ impl BackfillClient {
 
 /// Convenience function to enqueue a high-priority job in the fast queue.
 ///
-/// This is equivalent to calling `enqueue` with `Priority::FAST_DEFAULT` and `Queue::Fast`.
+/// This is equivalent to calling `enqueue` with `Priority::FAST_DEFAULT` and
+/// `Queue::Fast`.
 pub async fn enqueue_fast<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -323,13 +313,14 @@ where
         job_key,
         ..Default::default()
     };
-    
+
     client.enqueue(task_identifier, payload, spec).await
 }
 
 /// Convenience function to enqueue a job in the bulk queue.
 ///
-/// This is equivalent to calling `enqueue` with `Priority::BULK_DEFAULT` and `Queue::Bulk`.
+/// This is equivalent to calling `enqueue` with `Priority::BULK_DEFAULT` and
+/// `Queue::Bulk`.
 pub async fn enqueue_bulk<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -345,7 +336,7 @@ where
         job_key,
         ..Default::default()
     };
-    
+
     client.enqueue(task_identifier, payload, spec).await
 }
 
@@ -368,7 +359,7 @@ where
         job_key,
         ..Default::default()
     };
-    
+
     client.enqueue(task_identifier, payload, spec).await
 }
 
