@@ -1,4 +1,5 @@
-use anyhow::Result;
+use backfill::BackfillError;
+type Result<T> = std::result::Result<T, BackfillError>;
 use backfill::{BackfillClient, JobSpec, Priority, Queue, enqueue_bulk, enqueue_fast};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;

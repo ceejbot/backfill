@@ -48,7 +48,6 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 // Re-export commonly used types from graphile_worker
 pub use graphile_worker::{IntoTaskHandlerResult, JobKeyMode, TaskHandler, WorkerContext, WorkerOptions};
@@ -56,6 +55,9 @@ use graphile_worker::{Job, JobSpec as GraphileJobSpec, JobSpecBuilder, WorkerUti
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+
+mod errors;
+pub use errors::{BackfillError, WorkerError};
 
 /// Priority levels for jobs in the backfill system.
 ///
@@ -192,27 +194,27 @@ impl BackfillClient {
     ///
     /// This will create a connection pool and initialize the GraphileWorker
     /// schema.
-    pub async fn new(database_url: &str) -> Result<Self> {
+    pub async fn new(database_url: &str) -> Result<Self, BackfillError> {
         let pool = PgPoolOptions::new().max_connections(10).connect(database_url).await?;
 
         Self::with_pool_and_schema(pool, "graphile_worker".to_string()).await
     }
 
     /// Create a BackfillClient with the given database URL and custom schema.
-    pub async fn new_with_schema(database_url: &str, schema: &str) -> Result<Self> {
+    pub async fn new_with_schema(database_url: &str, schema: &str) -> Result<Self, BackfillError> {
         let pool = PgPoolOptions::new().max_connections(10).connect(database_url).await?;
 
         Self::with_pool_and_schema(pool, schema.to_string()).await
     }
 
     /// Create a BackfillClient with an existing connection pool.
-    pub async fn with_pool(pool: PgPool) -> Result<Self> {
+    pub async fn with_pool(pool: PgPool) -> Result<Self, BackfillError> {
         Self::with_pool_and_schema(pool, "graphile_worker".to_string()).await
     }
 
     /// Create a BackfillClient with an existing connection pool and custom
     /// schema.
-    pub async fn with_pool_and_schema(pool: PgPool, schema: String) -> Result<Self> {
+    pub async fn with_pool_and_schema(pool: PgPool, schema: String) -> Result<Self, BackfillError> {
         // Run migrations to ensure schema is set up
         graphile_worker::WorkerOptions::default()
             .schema(&schema)
@@ -247,7 +249,7 @@ impl BackfillClient {
     ///
     /// # Returns
     /// The Job struct containing the job ID and metadata.
-    pub async fn enqueue<T>(&self, task_identifier: &str, payload: &T, spec: JobSpec) -> Result<Job>
+    pub async fn enqueue<T>(&self, task_identifier: &str, payload: &T, spec: JobSpec) -> Result<Job, BackfillError>
     where
         T: Serialize,
     {
@@ -263,7 +265,7 @@ impl BackfillClient {
     ///
     /// This method uses the task's IDENTIFIER constant and ensures the payload
     /// type matches the expected task type.
-    pub async fn enqueue_task<T>(&self, task: T, spec: JobSpec) -> Result<Job>
+    pub async fn enqueue_task<T>(&self, task: T, spec: JobSpec) -> Result<Job, BackfillError>
     where
         T: TaskHandler + Serialize,
     {
@@ -273,21 +275,21 @@ impl BackfillClient {
     }
 
     /// Remove a job by its unique key.
-    pub async fn remove_job(&self, job_key: &str) -> Result<()> {
+    pub async fn remove_job(&self, job_key: &str) -> Result<(), BackfillError> {
         let utils = self.utils();
         utils.remove_job(job_key).await?;
         Ok(())
     }
 
     /// Mark jobs as completed.
-    pub async fn complete_jobs(&self, job_ids: &[i64]) -> Result<()> {
+    pub async fn complete_jobs(&self, job_ids: &[i64]) -> Result<(), BackfillError> {
         let utils = self.utils();
         utils.complete_jobs(job_ids).await?;
         Ok(())
     }
 
     /// Permanently fail jobs with a reason.
-    pub async fn fail_jobs(&self, job_ids: &[i64], reason: &str) -> Result<()> {
+    pub async fn fail_jobs(&self, job_ids: &[i64], reason: &str) -> Result<(), BackfillError> {
         let utils = self.utils();
         utils.permanently_fail_jobs(job_ids, reason).await?;
         Ok(())
@@ -303,7 +305,7 @@ pub async fn enqueue_fast<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job>
+) -> Result<Job, BackfillError>
 where
     T: Serialize,
 {
@@ -326,7 +328,7 @@ pub async fn enqueue_bulk<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job>
+) -> Result<Job, BackfillError>
 where
     T: Serialize,
 {
@@ -348,7 +350,7 @@ pub async fn enqueue_emergency<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job>
+) -> Result<Job, BackfillError>
 where
     T: Serialize,
 {
