@@ -190,3 +190,41 @@ impl From<std::io::Error> for WorkerError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_classification() {
+        // Non-retryable errors
+        let non_retryable_cases = vec![
+            "Invalid input provided", "Malformed JSON data", "Unauthorized access", "Forbidden operation",
+            "Resource not found", "Bad request format", "Validation failed", "Parse error in payload",
+        ];
+
+        for case in non_retryable_cases {
+            let error = WorkerError::classify_from_message(case.to_string());
+            assert!(!error.is_retryable(), "Expected '{}' to be non-retryable", case);
+        }
+
+        // Retryable errors
+        let retryable_cases = vec![
+            "Connection timeout",
+            "Network unreachable",
+            "Service unavailable",
+            "Rate limit exceeded",
+            "Too many requests",
+            "Database connection failed",
+        ];
+
+        for case in retryable_cases {
+            let error = WorkerError::classify_from_message(case.to_string());
+            assert!(error.is_retryable(), "Expected '{}' to be retryable", case);
+        }
+
+        // Unknown errors default to retryable
+        let error = WorkerError::classify_from_message("Some unknown error".to_string());
+        assert!(error.is_retryable(), "Unknown errors should be retryable");
+    }
+}

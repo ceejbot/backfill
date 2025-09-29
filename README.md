@@ -7,17 +7,38 @@ A boringly-named priority queue system for doing async work. This library and wo
 
 ## What it does
 
+This is a postgres-backed
+
 [ TODO ]
 
-Look at the `examples/` directory and the readme there for practical usage.
+Features:
 
-## Dead Letter Queue (DLQ) Setup
+- **Priority queues**: EMERGENCY, FAST_HIGH, FAST_DEFAULT, BULK_DEFAULT, BULK_LOW, BULK_LOWEST
+- **Named queues**: Fast, Bulk, DeadLetter, Custom(name)
+- **Scheduling**: Immediate or delayed execution with `run_at`
+- **Idempotency**: Use `job_key` for deduplication
+- **Exponential backoff**: Built-in retry policies with jitter to prevent thundering herds
+- **Dead letter queue**: Handling jobs that experience un-retryable failures or exceed their retry limits
+- **Error handling**: Automatic retry classification
+- **Monitoring**: Comprehensive logging and tracing
 
-The backfill library includes comprehensive Dead Letter Queue functionality for handling jobs that exceed their retry limits.
+
+Look at the `examples/` directory and the readme there for a practical usage example.
+
+## Configuration and setup
+
+
+All configuration is passed in via environment variables:
+
+- `DATABASE_URL`: PostgreSQL connection string
+- `FAST_QUEUE_CONCURRENCY`: Workers for high-priority jobs (default: 10)
+- `BULK_QUEUE_CONCURRENCY`: Workers for bulk processing (default: 5)
+- `POLL_INTERVAL_MS`: Job polling interval (default: 200ms)
+- `RUST_LOG`: Logging configuration
 
 ### Automatic Setup
 
-The library can automatically create the DLQ schema:
+The `graphile_worker` crate sets up all its database tables with no action needed if the database user has create table permissions. The library can also automatically create the DLQ schema:
 
 ```rust
 use backfill::BackfillClient;
@@ -25,8 +46,6 @@ use backfill::BackfillClient;
 let client = BackfillClient::new("postgresql://localhost/mydb", "my_schema").await?;
 client.init_dlq().await?;  // Creates DLQ table if needed
 ```
-
-### Manual Migration Setup
 
 For production environments with controlled migrations, use the provided SQL files:
 

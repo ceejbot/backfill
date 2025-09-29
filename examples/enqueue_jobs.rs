@@ -1,4 +1,7 @@
-use backfill::{BackfillClient, JobSpec, Priority, Queue, RetryPolicy, enqueue_fast, enqueue_bulk, enqueue_fast_with_retries, enqueue_critical, enqueue_bulk_with_retries};
+use backfill::{
+    BackfillClient, JobSpec, Priority, Queue, RetryPolicy, enqueue_bulk, enqueue_bulk_with_retries, enqueue_critical,
+    enqueue_fast, enqueue_fast_with_retries,
+};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -37,8 +40,8 @@ pub struct GenerateReportJob {
 
 /// Setup tracing for better logging
 fn setup_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("backfill=info,enqueue_jobs=info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("backfill=info,enqueue_jobs=info"));
 
     tracing_subscriber::registry()
         .with(
@@ -56,11 +59,11 @@ fn setup_tracing() {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_tracing();
 
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://localhost:5432/backfill".to_string());
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://localhost:5432/backfill".to_string());
 
     println!("🚀 Connecting to database: {}", database_url);
-    
+
     // Create the backfill client
     let client = BackfillClient::new(&database_url).await?;
     println!("✅ Connected to database and initialized schema");
@@ -86,7 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
-    println!("✉️  Enqueued ExampleJob: {} (job_id: {})", example_job.message, job.id());
+    println!(
+        "✉️  Enqueued ExampleJob: {} (job_id: {})",
+        example_job.message,
+        job.id()
+    );
 
     // Enqueue a high-priority email job using the convenience function
     let email_job = SendEmailJob {
@@ -105,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!("📧 Enqueued SendEmailJob to: {} (job_id: {})", email_job.to, job.id());
 
-    // Enqueue a bulk processing job  
+    // Enqueue a bulk processing job
     let process_job = ProcessUserDataJob {
         user_id: "user-456".to_string(),
         data_type: "analytics".to_string(),
@@ -119,7 +126,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(format!("process-{}-{}", process_job.user_id, process_job.data_type)),
     )
     .await?;
-    println!("📊 Enqueued ProcessUserDataJob for user: {} (job_id: {})", process_job.user_id, job.id());
+    println!(
+        "📊 Enqueued ProcessUserDataJob for user: {} (job_id: {})",
+        process_job.user_id,
+        job.id()
+    );
 
     // Enqueue a scheduled report generation job (delayed by 30 seconds)
     let report_job = GenerateReportJob {
@@ -142,7 +153,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
-    println!("📈 Enqueued GenerateReportJob (scheduled for 30s): {} report (job_id: {})", report_job.report_type, job.id());
+    println!(
+        "📈 Enqueued GenerateReportJob (scheduled for 30s): {} report (job_id: {})",
+        report_job.report_type,
+        job.id()
+    );
 
     // Enqueue a job that will fail (for testing error handling)
     let failing_job = ExampleJob {
@@ -163,11 +178,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
-    println!("💥 Enqueued failing ExampleJob for error testing (job_id: {})", job.id());
+    println!(
+        "💥 Enqueued failing ExampleJob for error testing (job_id: {})",
+        job.id()
+    );
 
     println!("\n🔄 Demonstrating exponential backoff retry policies...");
 
-    // Enqueue a critical job with aggressive retries (12 attempts, up to 10 minutes)
+    // Enqueue a critical job with aggressive retries (12 attempts, up to 10
+    // minutes)
     let critical_job = SendEmailJob {
         to: "admin@example.com".to_string(),
         subject: "CRITICAL ALERT: System Issue Detected".to_string(),
@@ -182,7 +201,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("critical-alert-001".to_string()),
     )
     .await?;
-    println!("🚨 Enqueued critical alert with aggressive retries (job_id: {})", job.id());
+    println!(
+        "🚨 Enqueued critical alert with aggressive retries (job_id: {})",
+        job.id()
+    );
 
     // Enqueue a job with fast retries for quick turnaround
     let notification_job = ExampleJob {
@@ -198,7 +220,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("fast-notification".to_string()),
     )
     .await?;
-    println!("⚡ Enqueued fast notification with quick retries (job_id: {})", job.id());
+    println!(
+        "⚡ Enqueued fast notification with quick retries (job_id: {})",
+        job.id()
+    );
 
     // Enqueue a bulk job with conservative retries
     let bulk_job = ProcessUserDataJob {
@@ -218,11 +243,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Enqueue a job with custom retry policy
     let custom_retry_policy = RetryPolicy::new(
-        6,                                    // 6 attempts
+        6,                                     // 6 attempts
         std::time::Duration::from_millis(500), // Start with 500ms
-        std::time::Duration::from_secs(60),   // Cap at 1 minute
-        1.8,                                  // 1.8x multiplier
-    ).with_jitter(0.2); // 20% jitter
+        std::time::Duration::from_secs(60),    // Cap at 1 minute
+        1.8,                                   // 1.8x multiplier
+    )
+    .with_jitter(0.2); // 20% jitter
 
     let custom_job = GenerateReportJob {
         report_type: "analytics_summary".to_string(),
@@ -240,10 +266,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 queue: Queue::Custom("analytics".to_string()),
                 job_key: Some("weekly-analytics".to_string()),
                 ..Default::default()
-            }.with_retry_policy(custom_retry_policy),
+            }
+            .with_retry_policy(custom_retry_policy),
         )
         .await?;
-    println!("📊 Enqueued analytics job with custom retry policy (job_id: {})", job.id());
+    println!(
+        "📊 Enqueued analytics job with custom retry policy (job_id: {})",
+        job.id()
+    );
 
     println!("\n🎯 All jobs enqueued successfully!");
     println!("\n🔧 To process these jobs, run the worker:");
@@ -257,9 +287,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📈 Retry policies used:");
     println!("   🚨 Critical: 12 attempts, 500ms-600s, 1.5x backoff, 15% jitter");
     println!("   ⚡ Fast: 3 attempts, 100ms-30s, 2.0x backoff, 10% jitter");
-    println!("   📦 Conservative: 5 attempts, 5s-1800s, 2.5x backoff, 20% jitter"); 
+    println!("   📦 Conservative: 5 attempts, 5s-1800s, 2.5x backoff, 20% jitter");
     println!("   📊 Custom: 6 attempts, 500ms-60s, 1.8x backoff, 20% jitter");
-    println!("\nThese policies prevent thundering herds and provide appropriate retry behavior for different job types!");
+    println!(
+        "\nThese policies prevent thundering herds and provide appropriate retry behavior for different job types!"
+    );
 
     Ok(())
 }

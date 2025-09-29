@@ -1,10 +1,12 @@
 use std::time::Duration;
 
-use backfill::{BackfillClient, BackfillError, WorkerError, IntoTaskHandlerResult, TaskHandler, WorkerContext, WorkerOptions};
+use backfill::{
+    BackfillClient, BackfillError, IntoTaskHandlerResult, TaskHandler, WorkerContext, WorkerError, WorkerOptions,
+};
 use serde::{Deserialize, Serialize};
-use tokio::signal;
 use sqlx::postgres::PgPoolOptions;
-use tracing::{span, info, warn, error, Level};
+use tokio::signal;
+use tracing::{Level, error, info, span, warn};
 
 // Worker binary uses tracing for structured logging
 
@@ -97,7 +99,7 @@ impl TaskHandler for ExampleJob {
     const IDENTIFIER: &'static str = "example_job";
 
     async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        let span = span!(Level::INFO, "example_job", 
+        let span = span!(Level::INFO, "example_job",
             message = %self.message,
             job_id = ctx.job().id(),
             attempt = ctx.job().attempts(),
@@ -152,17 +154,17 @@ impl TaskHandler for SendEmailJob {
         let _enter = span.enter();
 
         info!("Sending email to: {}", self.to);
-        
+
         // Simulate email sending (in real implementation, integrate with email service)
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         // Validate email address format
         if !self.to.contains('@') {
             return Err(WorkerError::InvalidInput {
                 message: format!("Invalid email address: {}", self.to),
             });
         }
-        
+
         info!("Email sent successfully to {}", self.to);
         Ok::<(), WorkerError>(())
     }
@@ -184,11 +186,11 @@ impl TaskHandler for ProcessUserDataJob {
         let _enter = span.enter();
 
         info!("Processing {} data for user: {}", self.data_type, self.user_id);
-        
+
         // Simulate data processing work
         let processing_time = self.batch_size.unwrap_or(10) * 50; // 50ms per item
         tokio::time::sleep(Duration::from_millis(processing_time as u64)).await;
-        
+
         info!("User data processing completed for user: {}", self.user_id);
         Ok::<(), WorkerError>(())
     }
@@ -210,25 +212,28 @@ impl TaskHandler for GenerateReportJob {
         let span = span!(Level::INFO, "generate_report", report_type = %self.report_type, format = %self.output_format);
         let _enter = span.enter();
 
-        info!("Generating {} report for date range: {}", self.report_type, self.date_range);
-        
+        info!(
+            "Generating {} report for date range: {}",
+            self.report_type, self.date_range
+        );
+
         // Simulate report generation (could be CPU intensive)
         tokio::time::sleep(Duration::from_secs(2)).await;
-        
+
         // Validate output format
         if !["pdf", "csv", "json"].contains(&self.output_format.as_str()) {
             return Err(WorkerError::InvalidInput {
                 message: format!("Unsupported output format: {}", self.output_format),
             });
         }
-        
+
         info!("Report generated successfully: {} format", self.output_format);
-        
+
         // Send to recipients (simulate)
         for recipient in &self.recipients {
             info!("Sending report to: {}", recipient);
         }
-        
+
         Ok::<(), WorkerError>(())
     }
 }
@@ -255,9 +260,10 @@ async fn process_example_job(payload: serde_json::Value) -> Result<(), WorkerErr
 /// Real worker implementation using GraphileWorker
 async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
     info!("Setting up database connection pool");
-    
+
     // Create PostgreSQL connection pool
-    let total_connections = (config.fast_queue_concurrency + config.bulk_queue_concurrency + config.dead_letter_queue_concurrency) as u32;
+    let total_connections =
+        (config.fast_queue_concurrency + config.bulk_queue_concurrency + config.dead_letter_queue_concurrency) as u32;
     let pg_pool = PgPoolOptions::new()
         .max_connections(total_connections.max(5)) // Ensure at least 5 connections
         .connect(&config.database_url)
@@ -300,7 +306,10 @@ async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
     info!("Worker is now ready to process jobs");
 
     // Run the worker - this will block and process jobs until shutdown
-    worker.run().await.map_err(|e| BackfillError::WorkerRuntime(e.to_string()))?;
+    worker
+        .run()
+        .await
+        .map_err(|e| BackfillError::WorkerRuntime(e.to_string()))?;
 
     info!("Worker stopped");
     Ok(())
@@ -313,8 +322,8 @@ fn setup_logging() -> Result<(), BackfillError> {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("backfill=info,backfill_worker=info"));
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("backfill=info,backfill_worker=info"));
 
         // Check if JSON output is requested via environment variable
         let use_json = std::env::var("LOG_FORMAT")
@@ -451,40 +460,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_classification() {
-        // Non-retryable errors
-        let non_retryable_cases = vec![
-            "Invalid input provided", "Malformed JSON data", "Unauthorized access", "Forbidden operation",
-            "Resource not found", "Bad request format", "Validation failed", "Parse error in payload",
-        ];
-
-        for case in non_retryable_cases {
-            let error = WorkerError::classify_from_message(case.to_string());
-            assert!(!error.is_retryable(), "Expected '{}' to be non-retryable", case);
-        }
-
-        // Retryable errors
-        let retryable_cases = vec![
-            "Connection timeout",
-            "Network unreachable",
-            "Service unavailable",
-            "Rate limit exceeded",
-            "Too many requests",
-            "Database connection failed",
-        ];
-
-        for case in retryable_cases {
-            let error = WorkerError::classify_from_message(case.to_string());
-            assert!(error.is_retryable(), "Expected '{}' to be retryable", case);
-        }
-
-        // Unknown errors default to retryable
-        let error = WorkerError::classify_from_message("Some unknown error".to_string());
-        assert!(error.is_retryable(), "Unknown errors should be retryable");
-    }
-
-    #[test]
-    fn test_config_defaults() {
+    fn config_defaults() {
         let config = WorkerConfig::default();
         assert_eq!(config.database_url, "postgresql://localhost:5432/backfill");
         assert_eq!(config.schema, "graphile_worker");
