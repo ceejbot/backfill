@@ -145,7 +145,8 @@ async fn process_example_job(payload: serde_json::Value) -> Result<(), WorkerErr
     }
 }
 
-/// Simple worker implementation that connects to the database and processes jobs
+/// Simple worker implementation that connects to the database and processes
+/// jobs
 async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
     // Create the backfill client for database setup (ensures DB is set up)
     let _client = BackfillClient::new(&config.database_url).await?;

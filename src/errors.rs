@@ -62,7 +62,7 @@ pub enum WorkerError {
     // Generic wrapper for any other error (defaults to retryable)
     #[error("Job failed: {message}")]
     JobFailed { message: String },
-    
+
     // Backfill library errors
     #[error(transparent)]
     Backfill(#[from] BackfillError),
@@ -79,7 +79,7 @@ impl WorkerError {
             | WorkerError::Forbidden { .. }
             | WorkerError::ResourceNotFound { .. }
             | WorkerError::ValidationFailed { .. } => false,
-            
+
             // Retryable errors
             WorkerError::ConnectionTimeout { .. }
             | WorkerError::NetworkError { .. }
@@ -87,13 +87,14 @@ impl WorkerError {
             | WorkerError::RateLimitExceeded { .. }
             | WorkerError::TemporaryUnavailable { .. }
             | WorkerError::JobFailed { .. } => true,
-            
+
             // For BackfillError, defer to its own classification if it has one
             WorkerError::Backfill(_) => true, // Default to retryable for BackfillError
         }
     }
 
-    /// Create a WorkerError from any error by classifying it based on the message
+    /// Create a WorkerError from any error by classifying it based on the
+    /// message
     pub fn from_any_error<E: std::error::Error>(error: E) -> Self {
         let message = error.to_string();
         Self::classify_from_message(message)
@@ -149,23 +150,37 @@ impl WorkerError {
 }
 
 // Manual implementations for common error types to avoid conflicts
-// Note: anyhow::Error conversion is handled in the worker binary where anyhow is available
+// Note: anyhow::Error conversion is handled in the worker binary where anyhow
+// is available
 
 impl From<serde_json::Error> for WorkerError {
     fn from(error: serde_json::Error) -> Self {
-        WorkerError::MalformedData { message: error.to_string() }
+        WorkerError::MalformedData {
+            message: error.to_string(),
+        }
     }
 }
 
 impl From<std::io::Error> for WorkerError {
     fn from(error: std::io::Error) -> Self {
         match error.kind() {
-            std::io::ErrorKind::TimedOut => WorkerError::ConnectionTimeout { message: error.to_string() },
-            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset 
-                | std::io::ErrorKind::ConnectionAborted => WorkerError::NetworkError { message: error.to_string() },
-            std::io::ErrorKind::NotFound => WorkerError::ResourceNotFound { message: error.to_string() },
-            std::io::ErrorKind::PermissionDenied => WorkerError::Forbidden { message: error.to_string() },
-            _ => WorkerError::JobFailed { message: error.to_string() },
+            std::io::ErrorKind::TimedOut => WorkerError::ConnectionTimeout {
+                message: error.to_string(),
+            },
+            std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted => WorkerError::NetworkError {
+                message: error.to_string(),
+            },
+            std::io::ErrorKind::NotFound => WorkerError::ResourceNotFound {
+                message: error.to_string(),
+            },
+            std::io::ErrorKind::PermissionDenied => WorkerError::Forbidden {
+                message: error.to_string(),
+            },
+            _ => WorkerError::JobFailed {
+                message: error.to_string(),
+            },
         }
     }
 }

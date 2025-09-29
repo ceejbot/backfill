@@ -1,0 +1,71 @@
+name: Test
+
+on:
+  push:
+    branches: [ latest ]
+  pull_request:
+    branches: [ latest ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: backfill_test
+          POSTGRES_USER: testuser
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly, stable
+        components: clippy, rustfmt
+        cache-directories: |
+          ~/.cargo/registry
+          ~/.cargo/bin
+          target
+    
+    - name: Install cargo-nextest
+      shell: bash
+      run: |
+        if [[ -z $(which cargo-nextest) ]]; then
+          curl -sL https://get.nexte.st/latest/linux -o nextest.tgz
+          tar xfz nextest.tgz
+          mv cargo-nextest /home/runner/.cargo/bin
+        fi
+    
+    - name: Check formatting
+      run: cargo +nightly fmt --check --all
+    
+    - name: Run clippy
+      run: cargo +stable clippy --all-targets -- -D warnings
+    
+    - name: Check compilation
+      run: cargo check --all-targets
+    
+    - name: Run tests
+      run: cargo nextest run --all-targets -- --skip no_ci
+      env:
+        DATABASE_URL: postgresql://testuser@localhost:5432/backfill_test
+    
+    - name: Run doctests
+      run: cargo test --doc
+      env:
+        DATABASE_URL: postgresql://testuser@localhost:5432/backfill_test
