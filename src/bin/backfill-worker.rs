@@ -117,6 +117,7 @@ pub async fn handle_example_job(job: ExampleJob) -> Result<(), WorkerError> {
 }
 
 /// Simple job processor function for demonstration
+#[allow(dead_code)]
 async fn process_example_job(payload: serde_json::Value) -> Result<(), WorkerError> {
     let span = span!(Level::INFO, "process_example_job");
     let _enter = span.enter();
