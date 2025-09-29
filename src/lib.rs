@@ -66,13 +66,11 @@ use graphile_worker::{Job, JobSpec as GraphileJobSpec, JobSpecBuilder};
 use serde::Serialize;
 
 mod client;
-mod deadletter;
 mod errors;
 mod priorities;
 mod retries;
 
 pub use client::*;
-pub use deadletter::*;
 pub use errors::{BackfillError, WorkerError};
 pub use priorities::*;
 pub use retries::*;

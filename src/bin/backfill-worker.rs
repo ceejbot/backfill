@@ -6,6 +6,7 @@ use backfill::{
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::{Level, error, info, span, warn};
 
 // Worker binary uses tracing for structured logging
@@ -20,6 +21,7 @@ pub struct WorkerConfig {
     pub dead_letter_queue_concurrency: usize,
     pub poll_interval: Duration,
     pub shutdown_timeout: Duration,
+    pub dlq_processor_interval: Duration,
 }
 
 impl Default for WorkerConfig {
@@ -32,6 +34,7 @@ impl Default for WorkerConfig {
             dead_letter_queue_concurrency: 2,
             poll_interval: Duration::from_millis(200),
             shutdown_timeout: Duration::from_secs(30),
+            dlq_processor_interval: Duration::from_secs(60), // Check for failed jobs every minute
         }
     }
 }
@@ -79,6 +82,13 @@ impl WorkerConfig {
                 .parse()
                 .map_err(|e: std::num::ParseIntError| BackfillError::ShutdownTimeoutParseInt(e.to_string()))?;
             config.shutdown_timeout = Duration::from_secs(secs);
+        }
+
+        if let Ok(interval_secs) = std::env::var("DLQ_PROCESSOR_INTERVAL_SECS") {
+            let secs: u64 = interval_secs
+                .parse()
+                .map_err(|e: std::num::ParseIntError| BackfillError::DlqProcessorIntervalParseInt(e.to_string()))?;
+            config.dlq_processor_interval = Duration::from_secs(secs);
         }
 
         Ok(config)
@@ -303,15 +313,38 @@ async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
         .await?;
 
     info!("GraphileWorker initialized successfully");
+
+    // Set up cancellation token for graceful shutdown
+    let cancellation_token = CancellationToken::new();
+    let dlq_cancellation_token = cancellation_token.clone();
+
+    // Start the DLQ processor background task
+    info!(
+        dlq_interval_secs = config.dlq_processor_interval.as_secs(),
+        "Starting DLQ processor background task"
+    );
+
+    let dlq_processor_handle = client.start_dlq_processor(config.dlq_processor_interval, dlq_cancellation_token);
+
     info!("Worker is now ready to process jobs");
 
     // Run the worker - this will block and process jobs until shutdown
-    worker
+    let worker_result = worker
         .run()
         .await
-        .map_err(|e| BackfillError::WorkerRuntime(e.to_string()))?;
+        .map_err(|e| BackfillError::WorkerRuntime(e.to_string()));
+
+    // Signal DLQ processor to shutdown
+    cancellation_token.cancel();
+
+    // Wait for DLQ processor to finish (with timeout)
+    match tokio::time::timeout(Duration::from_secs(5), dlq_processor_handle).await {
+        Ok(_) => info!("DLQ processor stopped gracefully"),
+        Err(_) => warn!("DLQ processor shutdown timeout - may still be running"),
+    }
 
     info!("Worker stopped");
+    worker_result?;
     Ok(())
 }
 
@@ -412,6 +445,7 @@ async fn main() -> Result<(), BackfillError> {
         dlq_concurrency = config.dead_letter_queue_concurrency,
         poll_interval_ms = config.poll_interval.as_millis(),
         shutdown_timeout_secs = config.shutdown_timeout.as_secs(),
+        dlq_processor_interval_secs = config.dlq_processor_interval.as_secs(),
         "Worker configuration loaded"
     );
 
@@ -469,5 +503,6 @@ mod tests {
         assert_eq!(config.dead_letter_queue_concurrency, 2);
         assert_eq!(config.poll_interval, Duration::from_millis(200));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+        assert_eq!(config.dlq_processor_interval, Duration::from_secs(60));
     }
 }

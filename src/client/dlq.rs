@@ -1,122 +1,107 @@
-use graphile_worker::{Job, JobKeyMode, TaskHandler, WorkerUtils};
-use serde::Serialize;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+//! Dead letter queue types
 
-use crate::{BackfillError, DlqFilter, DlqJob, DlqJobList, DlqStats, JobSpec, Priority, Queue};
+use chrono::{DateTime, Utc};
+use graphile_worker::{Job, JobKeyMode};
+use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
-/// High-level client for the backfill job queue system.
-pub struct BackfillClient {
-    pool: PgPool,
-    schema: String,
+use super::BackfillClient;
+use crate::{BackfillError, JobSpec, Priority, Queue};
+
+// === Dead Letter Queue Types ===
+
+/// A job that has been moved to the dead letter queue after failing
+/// permanently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlqJob {
+    /// Unique DLQ entry ID
+    pub id: i64,
+    /// Original job ID from the main queue
+    pub original_job_id: Option<i64>,
+    /// Task identifier for the failed job
+    pub task_identifier: String,
+    /// Job payload as JSON
+    pub payload: serde_json::Value,
+    /// Queue name where the job originally ran
+    pub queue_name: String,
+    /// Job priority when originally enqueued
+    pub priority: i32,
+    /// Job key for deduplication (if any)
+    pub job_key: Option<String>,
+    /// Maximum retry attempts allowed
+    pub max_attempts: Option<i32>,
+    /// Human-readable failure reason
+    pub failure_reason: String,
+    /// Number of times the job failed
+    pub failure_count: i32,
+    /// Last error details as JSON
+    pub last_error: Option<serde_json::Value>,
+    /// When the original job was created
+    pub original_created_at: Option<DateTime<Utc>>,
+    /// When the original job was scheduled to run
+    pub original_run_at: Option<DateTime<Utc>>,
+    /// When the job was moved to DLQ
+    pub failed_at: DateTime<Utc>,
+    /// How many times this job has been requeued from DLQ
+    pub requeued_count: i32,
+    /// When this job was last requeued from DLQ
+    pub last_requeued_at: Option<DateTime<Utc>>,
+    /// Admin notes about this failure
+    pub notes: Option<String>,
+}
+
+/// Filter parameters for querying DLQ jobs.
+#[derive(Debug, Clone, Default)]
+pub struct DlqFilter {
+    /// Filter by task identifier
+    pub task_identifier: Option<String>,
+    /// Filter by queue name
+    pub queue_name: Option<String>,
+    /// Only jobs that failed after this time
+    pub failed_after: Option<DateTime<Utc>>,
+    /// Only jobs that failed before this time
+    pub failed_before: Option<DateTime<Utc>>,
+    /// Maximum number of results to return
+    pub limit: Option<i32>,
+    /// Offset for pagination
+    pub offset: Option<i32>,
+}
+
+/// Paginated list of DLQ jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlqJobList {
+    /// The jobs in this page
+    pub jobs: Vec<DlqJob>,
+    /// Total number of jobs matching the filter
+    pub total: u32,
+    /// Offset of this page
+    pub offset: i32,
+    /// Limit used for this page
+    pub limit: i32,
+}
+
+/// Statistics about the dead letter queue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlqStats {
+    /// Total number of jobs in the DLQ
+    pub total_jobs: u32,
+    /// Number of unique task types in the DLQ
+    pub unique_tasks: u32,
+    /// Number of unique queues represented in the DLQ
+    pub unique_queues: u32,
+    /// Average number of failures per job
+    pub avg_failure_count: f64,
+    /// Total number of requeue operations performed
+    pub total_requeued: u32,
+    /// Timestamp of the oldest failure
+    pub oldest_failure: Option<DateTime<Utc>>,
+    /// Timestamp of the newest failure
+    pub newest_failure: Option<DateTime<Utc>>,
+    /// Breakdown of jobs by task type (top 10)
+    pub task_breakdown: Vec<(String, u32)>,
 }
 
 impl BackfillClient {
-    /// Create a new BackfillClient with the given database URL.
-    ///
-    /// This will create a connection pool and initialize the GraphileWorker
-    /// schema.
-    pub async fn new(database_url: &str) -> Result<Self, BackfillError> {
-        let pool = PgPoolOptions::new().max_connections(10).connect(database_url).await?;
-
-        Self::with_pool_and_schema(pool, "graphile_worker".to_string()).await
-    }
-
-    /// Create a BackfillClient with the given database URL and custom schema.
-    pub async fn new_with_schema(database_url: &str, schema: &str) -> Result<Self, BackfillError> {
-        let pool = PgPoolOptions::new().max_connections(10).connect(database_url).await?;
-
-        Self::with_pool_and_schema(pool, schema.to_string()).await
-    }
-
-    /// Create a BackfillClient with an existing connection pool.
-    pub async fn with_pool(pool: PgPool) -> Result<Self, BackfillError> {
-        Self::with_pool_and_schema(pool, "graphile_worker".to_string()).await
-    }
-
-    /// Create a BackfillClient with an existing connection pool and custom
-    /// schema.
-    pub async fn with_pool_and_schema(pool: PgPool, schema: String) -> Result<Self, BackfillError> {
-        // Run migrations to ensure schema is set up
-        graphile_worker::WorkerOptions::default()
-            .schema(&schema)
-            .pg_pool(pool.clone())
-            .init()
-            .await?;
-
-        Ok(Self { pool, schema })
-    }
-
-    /// Get the underlying PostgreSQL connection pool.
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
-    }
-
-    /// Get the schema name being used.
-    pub fn schema(&self) -> &str {
-        &self.schema
-    }
-
-    /// Create a WorkerUtils instance for job management.
-    pub fn utils(&self) -> WorkerUtils {
-        WorkerUtils::new(self.pool.clone(), self.schema.clone())
-    }
-
-    /// Enqueue a job with the specified task identifier and payload.
-    ///
-    /// # Arguments
-    /// * `task_identifier` - The string identifier for the task type
-    /// * `payload` - The job payload (must be JSON-serializable)
-    /// * `spec` - Job specification including priority, scheduling, etc.
-    ///
-    /// # Returns
-    /// The Job struct containing the job ID and metadata.
-    pub async fn enqueue<T>(&self, task_identifier: &str, payload: &T, spec: JobSpec) -> Result<Job, BackfillError>
-    where
-        T: Serialize,
-    {
-        let utils = self.utils();
-        let job = utils
-            .add_raw_job(task_identifier, serde_json::to_value(payload)?, spec.into())
-            .await?;
-
-        Ok(job)
-    }
-
-    /// Enqueue a job with a type-safe task handler.
-    ///
-    /// This method uses the task's IDENTIFIER constant and ensures the payload
-    /// type matches the expected task type.
-    pub async fn enqueue_task<T>(&self, task: T, spec: JobSpec) -> Result<Job, BackfillError>
-    where
-        T: TaskHandler + Serialize,
-    {
-        let utils = self.utils();
-        let job = utils.add_job(task, spec.into()).await?;
-        Ok(job)
-    }
-
-    /// Remove a job by its unique key.
-    pub async fn remove_job(&self, job_key: &str) -> Result<(), BackfillError> {
-        let utils = self.utils();
-        utils.remove_job(job_key).await?;
-        Ok(())
-    }
-
-    /// Mark jobs as completed.
-    pub async fn complete_jobs(&self, job_ids: &[i64]) -> Result<(), BackfillError> {
-        let utils = self.utils();
-        utils.complete_jobs(job_ids).await?;
-        Ok(())
-    }
-
-    /// Permanently fail jobs with a reason.
-    pub async fn fail_jobs(&self, job_ids: &[i64], reason: &str) -> Result<(), BackfillError> {
-        let utils = self.utils();
-        utils.permanently_fail_jobs(job_ids, reason).await?;
-        Ok(())
-    }
-
     /// Initialize the DLQ table if it doesn't exist.
     /// This creates the necessary schema for dead letter queue functionality.
     ///
@@ -409,7 +394,7 @@ impl BackfillClient {
         })
     }
 
-    /// Add a job to the DLQ. This is typically called by the worker when a job
+    /// Add a job to the DLQ. This is typically called internally when a job
     /// fails permanently after exhausting all retries.
     pub async fn add_to_dlq(
         &self,
@@ -468,6 +453,177 @@ impl BackfillClient {
             requeued_count: row.get("requeued_count"),
             last_requeued_at: row.get("last_requeued_at"),
             notes: row.get("notes"),
+        })
+    }
+
+    /// Scan for permanently failed jobs and move them to the Dead Letter Queue.
+    ///
+    /// This method looks for jobs that have exhausted their retry attempts and
+    /// moves them to the DLQ for manual inspection and potential reprocessing.
+    ///
+    /// Returns the number of jobs moved to the DLQ.
+    pub async fn process_failed_jobs(&self) -> Result<u32, BackfillError> {
+        // Find jobs that have failed permanently (attempts >= max_attempts)
+        // and haven't been processed yet
+        // Note: The jobs view doesn't include payload, so we'll handle this limitation
+        let find_failed_jobs_query = format!(
+            r#"
+            SELECT id, task_identifier, queue_name, priority, key as job_key,
+                   max_attempts, attempts, last_error, created_at, run_at, updated_at
+            FROM {}.jobs
+            WHERE attempts >= max_attempts
+              AND max_attempts > 0
+              AND id NOT IN (SELECT COALESCE(original_job_id, -1) FROM {}.backfill_dlq)
+            ORDER BY updated_at ASC
+            LIMIT 100
+        "#,
+            self.schema, self.schema
+        );
+
+        let failed_jobs = sqlx::query(&find_failed_jobs_query).fetch_all(&self.pool).await?;
+
+        let mut moved_count = 0;
+
+        for job_row in failed_jobs {
+            let job_id: i64 = job_row.get("id");
+            let task_identifier: String = job_row.get("task_identifier");
+            // Payload is not available in the jobs view, use empty object as placeholder
+            let payload = serde_json::json!({});
+            let queue_name: Option<String> = job_row.get("queue_name");
+            let queue_name = queue_name.unwrap_or_else(|| "default".to_string());
+            let priority: i32 = job_row.get("priority");
+            let job_key: Option<String> = job_row.get("job_key");
+            let max_attempts: i16 = job_row.get("max_attempts");
+            let attempts: i16 = job_row.get("attempts");
+            let last_error: Option<serde_json::Value> = job_row.get("last_error");
+            let created_at: chrono::DateTime<chrono::Utc> = job_row.get("created_at");
+            let run_at: chrono::DateTime<chrono::Utc> = job_row.get("run_at");
+
+            // Move to DLQ
+            let insert_dlq_query = format!(
+                r#"
+                INSERT INTO {}.backfill_dlq (
+                    original_job_id, task_identifier, payload, queue_name, priority,
+                    job_key, max_attempts, failure_reason, failure_count, last_error,
+                    original_created_at, original_run_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+                self.schema
+            );
+
+            let failure_reason = format!("Job exceeded maximum retry attempts ({}/{})", attempts, max_attempts);
+
+            let insert_result = sqlx::query(&insert_dlq_query)
+                .bind(job_id)
+                .bind(&task_identifier)
+                .bind(&payload)
+                .bind(&queue_name)
+                .bind(priority)
+                .bind(&job_key)
+                .bind(max_attempts as i32)
+                .bind(failure_reason)
+                .bind(attempts as i32)
+                .bind(&last_error)
+                .bind(created_at)
+                .bind(run_at)
+                .execute(&self.pool)
+                .await;
+
+            match insert_result {
+                Ok(_) => {
+                    // Successfully moved to DLQ, now remove from main jobs table
+                    let delete_query = format!("DELETE FROM {}.jobs WHERE id = $1", self.schema);
+                    match sqlx::query(&delete_query).bind(job_id).execute(&self.pool).await {
+                        Ok(_) => {
+                            moved_count += 1;
+                            tracing::info!(
+                                job_id = job_id,
+                                task_identifier = %task_identifier,
+                                attempts = attempts,
+                                max_attempts = max_attempts,
+                                "Successfully moved failed job to DLQ"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                job_id = job_id,
+                                task_identifier = %task_identifier,
+                                error = %e,
+                                "Failed to delete job from main table after DLQ insertion"
+                            );
+                            // Consider this a partial failure - job is in DLQ
+                            // but also still in main table
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        job_id = job_id,
+                        task_identifier = %task_identifier,
+                        error = %e,
+                        "Failed to insert job into DLQ"
+                    );
+                }
+            }
+        }
+
+        if moved_count > 0 {
+            tracing::info!(moved_count = moved_count, "DLQ processing completed");
+        }
+
+        Ok(moved_count)
+    }
+
+    /// Process failed jobs continuously in a background task.
+    ///
+    /// This spawns a background task that periodically scans for failed jobs
+    /// and moves them to the DLQ. The task runs until the provided cancellation
+    /// token is triggered.
+    ///
+    /// # Arguments
+    /// * `interval` - How often to scan for failed jobs
+    /// * `cancellation_token` - Token to signal when to stop the background
+    ///   task
+    ///
+    /// # Returns
+    /// A JoinHandle for the background task
+    pub fn start_dlq_processor(
+        &self,
+        interval: std::time::Duration,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let client = self.clone();
+
+        tokio::spawn(async move {
+            let mut interval_timer = tokio::time::interval(interval);
+            interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            tracing::info!(
+                interval_seconds = interval.as_secs(),
+                "Starting DLQ processor background task"
+            );
+
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        tracing::info!("DLQ processor shutting down");
+                        break;
+                    }
+                    _ = interval_timer.tick() => {
+                        match client.process_failed_jobs().await {
+                            Ok(count) if count > 0 => {
+                                tracing::info!(moved_jobs = count, "DLQ processor moved failed jobs");
+                            }
+                            Ok(_) => {
+                                // No jobs moved, no need to log
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "DLQ processor encountered error");
+                            }
+                        }
+                    }
+                }
+            }
         })
     }
 }

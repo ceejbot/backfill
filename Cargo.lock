@@ -102,6 +102,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-test",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

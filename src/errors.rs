@@ -16,6 +16,8 @@ pub enum BackfillError {
     PollIntervalParseInt(String),
     #[error("Invalid SHUTDOWN_TIMEOUT_SECS: {0}")]
     ShutdownTimeoutParseInt(String),
+    #[error("Invalid DLQ_PROCESSOR_INTERVAL_SECS: {0}")]
+    DlqProcessorIntervalParseInt(String),
 
     // DLQ errors
     #[error("DLQ job not found with ID: {0}")]
