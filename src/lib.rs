@@ -71,6 +71,9 @@ mod priorities;
 mod retries;
 mod worker;
 
+#[cfg(feature = "axum")]
+pub mod admin;
+
 pub use client::*;
 pub use errors::{BackfillError, WorkerError};
 pub use priorities::*;

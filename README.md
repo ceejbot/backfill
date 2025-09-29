@@ -7,9 +7,9 @@ A boringly-named priority queue system for doing async work. This library and wo
 
 ## What it does
 
-This is a postgres-backed
+This is a postgres-backed async work queue library that is a set of conveniences and features on top of the rust port of Graphile Worker. It gives you a library you can integrate with your own project to handle background tasks.
 
-[ TODO ]
+It's not finished yet. Don't use it until I say here that I've put it to work somewhere.
 
 Features:
 
@@ -21,12 +21,11 @@ Features:
 - **Dead letter queue**: Handling jobs that experience un-retryable failures or exceed their retry limits
 - **Error handling**: Automatic retry classification
 - **Monitoring**: Comprehensive logging and tracing
+- **Building blocks for an axum admin api**: via a router you can mount on your own axum api server.
 
-
-Look at the `examples/` directory and the readme there for a practical usage example.
+Look at the `examples/` directory and the readme there for practical usage examples.
 
 ## Configuration and setup
-
 
 All configuration is passed in via environment variables:
 
@@ -35,6 +34,23 @@ All configuration is passed in via environment variables:
 - `BULK_QUEUE_CONCURRENCY`: Workers for bulk processing (default: 5)
 - `POLL_INTERVAL_MS`: Job polling interval (default: 200ms)
 - `RUST_LOG`: Logging configuration
+
+### SQLx Compile-Time Query Verification
+
+This library is designed to take advantage of SQLx's compile-time query verification for production safety. Set `DATABASE_URL` during compilation to enable type-safe, compile-time checked SQL queries:
+
+```bash
+export DATABASE_URL="postgresql://localhost:5432/backfill"
+cargo build  # Queries verified against actual database schema
+```
+
+Alternatively, use offline mode with pre-generated query metadata:
+```bash
+cargo sqlx prepare  # Generates .sqlx/sqlx-data.json
+cargo build         # Uses cached metadata, no database required
+```
+
+See [`docs/SQLX_SETUP.md`](docs/SQLX_SETUP.md) for detailed setup instructions and best practices.
 
 ### Automatic Setup
 
@@ -61,4 +77,4 @@ See [`docs/DLQ_MIGRATIONS.md`](docs/DLQ_MIGRATIONS.md) for detailed migration in
 
 ## LICENSE
 
-This code is licensed via [the Parity Public License.](https://paritylicense.com) This license requires people who build on top of this source code to share their work with the community, too. This means if you hack on it for work, you have to make your work repo public somehow. Fair's fair. See the license text for details.
+This code is licensed via [the Parity Public License.](https://paritylicense.com) This license requires people who fork and change this source code to share their work with the community, too. Either contribute your work back as a PR or make your forked repo public. Fair's fair! See the license text for details.

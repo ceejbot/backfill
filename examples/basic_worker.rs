@@ -99,19 +99,25 @@ impl ExampleWorkerConfig {
         Ok(config)
     }
 
-    /// Convert to WorkerConfig for the library
+    /// Convert to graphile's WorkerConfig for the library
     pub fn into_worker_config(self) -> WorkerConfig {
+        self.into()
+    }
+}
+
+impl From<ExampleWorkerConfig> for WorkerConfig {
+    fn from(value: ExampleWorkerConfig) -> Self {
         WorkerConfig {
-            database_url: self.database_url,
-            schema: self.schema,
+            database_url: value.database_url,
+            schema: value.schema,
             queue_configs: vec![
-                QueueConfig::named_queue("fast", self.fast_concurrency),
-                QueueConfig::named_queue("bulk", self.bulk_concurrency),
-                QueueConfig::named_queue("dead_letter", self.dlq_concurrency),
+                QueueConfig::named_queue("fast", value.fast_concurrency),
+                QueueConfig::named_queue("bulk", value.bulk_concurrency),
+                QueueConfig::named_queue("dead_letter", value.dlq_concurrency),
                 QueueConfig::default_queue(5), // Default queue with moderate concurrency
             ],
-            poll_interval: self.poll_interval,
-            dlq_processor_interval: Some(self.dlq_processor_interval),
+            poll_interval: value.poll_interval,
+            dlq_processor_interval: Some(value.dlq_processor_interval),
         }
     }
 }
