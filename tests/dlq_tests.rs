@@ -37,10 +37,10 @@ async fn test_dlq_stats_empty() {
     let client = setup_test_client("dlq_stats").await;
 
     // Initialize DLQ
-    client.init_dlq().await.unwrap();
+    client.init_dlq().await.expect("this should work");
 
     // Get stats from empty DLQ
-    let stats = client.dlq_stats().await.unwrap();
+    let stats = client.dlq_stats().await.expect("this should work");
 
     assert_eq!(stats.total_jobs, 0);
     assert_eq!(stats.unique_tasks, 0);
@@ -57,11 +57,11 @@ async fn test_dlq_list_empty() {
     let client = setup_test_client("dlq_list").await;
 
     // Initialize DLQ
-    client.init_dlq().await.unwrap();
+    client.init_dlq().await.expect("this should work");
 
     // List jobs from empty DLQ
     let filter = DlqFilter::default();
-    let list = client.list_dlq_jobs(filter).await.unwrap();
+    let list = client.list_dlq_jobs(filter).await.expect("this should work");
 
     assert_eq!(list.jobs.len(), 0);
     assert_eq!(list.total, 0);
@@ -74,10 +74,10 @@ async fn test_dlq_get_nonexistent_job() {
     let client = setup_test_client("dlq_get").await;
 
     // Initialize DLQ
-    client.init_dlq().await.unwrap();
+    client.init_dlq().await.expect("this should work");
 
     // Try to get a job that doesn't exist
-    let job = client.get_dlq_job(99999).await.unwrap();
+    let job = client.get_dlq_job(99999).await.expect("this should work");
     assert!(job.is_none());
 }
 
@@ -86,10 +86,10 @@ async fn test_dlq_delete_nonexistent_job() {
     let client = setup_test_client("dlq_delete").await;
 
     // Initialize DLQ
-    client.init_dlq().await.unwrap();
+    client.init_dlq().await.expect("this should work");
 
     // Try to delete a job that doesn't exist
-    let deleted = client.delete_dlq_job(99999).await.unwrap();
+    let deleted = client.delete_dlq_job(99999).await.expect("this should work");
     assert!(!deleted);
 }
 
@@ -98,7 +98,7 @@ async fn test_dlq_requeue_nonexistent_job() {
     let client = setup_test_client("dlq_requeue").await;
 
     // Initialize DLQ
-    client.init_dlq().await.unwrap();
+    client.init_dlq().await.expect("this should work");
 
     // Try to requeue a job that doesn't exist
     let result = client.requeue_dlq_job(99999, Some("test note".to_string())).await;
@@ -116,10 +116,10 @@ async fn test_dlq_process_failed_jobs_empty() {
     let client = setup_test_client("dlq_process_failed").await;
 
     // Initialize DLQ
-    client.init_dlq().await.unwrap();
+    client.init_dlq().await.expect("this should work");
 
     // Process failed jobs from empty queue
-    let moved_count = client.process_failed_jobs().await.unwrap();
+    let moved_count = client.process_failed_jobs().await.expect("this should work");
     assert_eq!(moved_count, 0);
 }
 
@@ -128,21 +128,24 @@ async fn test_dlq_process_failed_jobs_with_mock_data() {
     let client = setup_test_client("dlq_routing").await;
 
     // Initialize DLQ
-    client.init_dlq().await.unwrap();
+    client.init_dlq().await.expect("this should work");
 
     // This test is more about testing the DLQ processing logic in isolation
     // rather than testing the full integration with GraphileWorker's internal job
     // management
 
     // For now, we'll just test that processing an empty queue works correctly
-    let moved_count = client.process_failed_jobs().await.unwrap();
+    let moved_count = client.process_failed_jobs().await.expect("this should work");
     assert_eq!(moved_count, 0);
 
     // Verify no jobs were added to DLQ
-    let dlq_jobs = client.list_dlq_jobs(DlqFilter::default()).await.unwrap();
+    let dlq_jobs = client
+        .list_dlq_jobs(DlqFilter::default())
+        .await
+        .expect("this should work");
     assert_eq!(dlq_jobs.jobs.len(), 0);
 
     // Test idempotency - running process_failed_jobs again should still move 0 jobs
-    let moved_count_second = client.process_failed_jobs().await.unwrap();
+    let moved_count_second = client.process_failed_jobs().await.expect("this should work");
     assert_eq!(moved_count_second, 0);
 }

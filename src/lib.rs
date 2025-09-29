@@ -69,11 +69,13 @@ mod client;
 mod errors;
 mod priorities;
 mod retries;
+mod worker;
 
 pub use client::*;
 pub use errors::{BackfillError, WorkerError};
 pub use priorities::*;
 pub use retries::*;
+pub use worker::*;
 
 /// Named queues for organizing different types of work.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

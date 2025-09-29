@@ -7,6 +7,10 @@ _help:
 test:
 	cargo nextest run
 
+# get a testing coverage report
+coverage:
+	cargo llvm-cov --all-targets --workspace --summary-only
+
 # Run the nightly formatter
 fmt:
 	cargo +nightly fmt

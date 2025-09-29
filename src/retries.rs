@@ -88,7 +88,7 @@ impl RetryPolicy {
         base_time: chrono::DateTime<chrono::Utc>,
     ) -> chrono::DateTime<chrono::Utc> {
         let delay = self.calculate_delay(attempt);
-        base_time + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::MAX)
+        base_time + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::MAX)
     }
 
     /// Check if we should retry for the given attempt number
@@ -235,9 +235,10 @@ mod tests {
 
         // Test retry time calculation
         let base_time = chrono::Utc::now();
-        let retry_time = spec.calculate_retry_time(0, base_time);
-        assert!(retry_time.is_some());
-        assert!(retry_time.unwrap() > base_time);
+        let retry_time = spec
+            .calculate_retry_time(0, base_time)
+            .expect("we should get a time from this");
+        assert!(retry_time > base_time);
 
         // Test when no more retries
         let no_retry = spec.calculate_retry_time(10, base_time);

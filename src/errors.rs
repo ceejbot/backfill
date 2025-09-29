@@ -18,6 +18,10 @@ pub enum BackfillError {
     ShutdownTimeoutParseInt(String),
     #[error("Invalid DLQ_PROCESSOR_INTERVAL_SECS: {0}")]
     DlqProcessorIntervalParseInt(String),
+    #[error("Failed to bind to port 3000: {0}")]
+    BindError(String),
+    #[error("Runtime error: {0}")]
+    RuntimeError(String),
 
     // DLQ errors
     #[error("DLQ job not found with ID: {0}")]
@@ -67,6 +71,9 @@ pub enum WorkerError {
     #[error("Resource temporarily unavailable: {message}")]
     TemporaryUnavailable { message: String },
 
+    #[error("External service failure: service='{service}'; {error}")]
+    ExternalServiceFailure { service: String, error: String },
+
     // Generic wrapper for any other error (defaults to retryable)
     #[error("Job failed: {message}")]
     JobFailed { message: String },
@@ -94,7 +101,8 @@ impl WorkerError {
             | WorkerError::ServiceUnavailable { .. }
             | WorkerError::RateLimitExceeded { .. }
             | WorkerError::TemporaryUnavailable { .. }
-            | WorkerError::JobFailed { .. } => true,
+            | WorkerError::JobFailed { .. }
+            | WorkerError::ExternalServiceFailure { .. } => true,
 
             // For BackfillError, defer to its own classification if it has one
             WorkerError::Backfill(_) => true, // Default to retryable for BackfillError
