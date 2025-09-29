@@ -1,12 +1,13 @@
 use std::time::Duration;
 
-use backfill::{BackfillClient, BackfillError, WorkerError};
+use backfill::{BackfillClient, BackfillError, WorkerError, IntoTaskHandlerResult, TaskHandler, WorkerContext, WorkerOptions};
 use serde::{Deserialize, Serialize};
 use tokio::signal;
 use tracing::{Level, error, info, span, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use sqlx::postgres::PgPoolOptions;
 
 /// Configuration for the worker
 #[derive(Debug, Clone)]
@@ -93,27 +94,128 @@ pub struct ExampleJob {
     pub should_fail: Option<bool>,
 }
 
-/// Handler for example jobs
-pub async fn handle_example_job(job: ExampleJob) -> Result<(), WorkerError> {
-    let span = span!(Level::INFO, "handle_example_job", message = %job.message);
-    let _enter = span.enter();
+impl TaskHandler for ExampleJob {
+    const IDENTIFIER: &'static str = "example_job";
 
-    info!("Processing example job: {}", job.message);
+    async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        let span = span!(Level::INFO, "example_job", message = %self.message);
+        let _enter = span.enter();
 
-    // Simulate work delay if specified
-    if let Some(delay) = job.delay_ms {
-        tokio::time::sleep(Duration::from_millis(delay)).await;
+        info!("Processing example job: {}", self.message);
+
+        // Simulate work delay if specified
+        if let Some(delay) = self.delay_ms {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+
+        // Simulate failure if requested (for testing)
+        if self.should_fail.unwrap_or(false) {
+            return Err(WorkerError::JobFailed {
+                message: "Job was configured to fail".to_string(),
+            });
+        }
+
+        info!("Example job completed successfully");
+        Ok::<(), WorkerError>(())
     }
+}
 
-    // Simulate failure if requested (for testing)
-    if job.should_fail.unwrap_or(false) {
-        return Err(WorkerError::JobFailed {
-            message: "Job was configured to fail".to_string(),
-        });
+/// Send email job for notifications and user communication
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SendEmailJob {
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+    pub template: Option<String>,
+}
+
+impl TaskHandler for SendEmailJob {
+    const IDENTIFIER: &'static str = "send_email";
+
+    async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        let span = span!(Level::INFO, "send_email", to = %self.to, subject = %self.subject);
+        let _enter = span.enter();
+
+        info!("Sending email to: {}", self.to);
+        
+        // Simulate email sending (in real implementation, integrate with email service)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // Validate email address format
+        if !self.to.contains('@') {
+            return Err(WorkerError::InvalidInput {
+                message: format!("Invalid email address: {}", self.to),
+            });
+        }
+        
+        info!("Email sent successfully to {}", self.to);
+        Ok::<(), WorkerError>(())
     }
+}
 
-    info!("Example job completed successfully");
-    Ok(())
+/// Process user data for analytics and reporting
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProcessUserDataJob {
+    pub user_id: String,
+    pub data_type: String,
+    pub batch_size: Option<usize>,
+}
+
+impl TaskHandler for ProcessUserDataJob {
+    const IDENTIFIER: &'static str = "process_user_data";
+
+    async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        let span = span!(Level::INFO, "process_user_data", user_id = %self.user_id, data_type = %self.data_type);
+        let _enter = span.enter();
+
+        info!("Processing {} data for user: {}", self.data_type, self.user_id);
+        
+        // Simulate data processing work
+        let processing_time = self.batch_size.unwrap_or(10) * 50; // 50ms per item
+        tokio::time::sleep(Duration::from_millis(processing_time as u64)).await;
+        
+        info!("User data processing completed for user: {}", self.user_id);
+        Ok::<(), WorkerError>(())
+    }
+}
+
+/// Generate reports job for business intelligence
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GenerateReportJob {
+    pub report_type: String,
+    pub date_range: String,
+    pub output_format: String,
+    pub recipients: Vec<String>,
+}
+
+impl TaskHandler for GenerateReportJob {
+    const IDENTIFIER: &'static str = "generate_report";
+
+    async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        let span = span!(Level::INFO, "generate_report", report_type = %self.report_type, format = %self.output_format);
+        let _enter = span.enter();
+
+        info!("Generating {} report for date range: {}", self.report_type, self.date_range);
+        
+        // Simulate report generation (could be CPU intensive)
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        
+        // Validate output format
+        if !["pdf", "csv", "json"].contains(&self.output_format.as_str()) {
+            return Err(WorkerError::InvalidInput {
+                message: format!("Unsupported output format: {}", self.output_format),
+            });
+        }
+        
+        info!("Report generated successfully: {} format", self.output_format);
+        
+        // Send to recipients (simulate)
+        for recipient in &self.recipients {
+            info!("Sending report to: {}", recipient);
+        }
+        
+        Ok::<(), WorkerError>(())
+    }
 }
 
 /// Simple job processor function for demonstration
@@ -127,60 +229,58 @@ async fn process_example_job(payload: serde_json::Value) -> Result<(), WorkerErr
 
     info!("Processing example job: {}", job.message);
 
-    // Execute the actual job handler
-    match handle_example_job(job).await {
-        Ok(()) => {
-            info!("Job completed successfully");
-            Ok(())
-        }
-        Err(worker_error) => {
-            if worker_error.is_retryable() {
-                warn!("Job failed with retryable error: {}", worker_error);
-            } else {
-                error!("Job failed with non-retryable error: {}", worker_error);
-                // For non-retryable errors, we still return the error
-                // The worker framework will handle DLQ routing
-            }
-            Err(worker_error)
-        }
-    }
+    // This function is now deprecated since we use TaskHandler directly
+    // Left for compatibility/example purposes
+    warn!("process_example_job called - use TaskHandler directly instead");
+    Err(WorkerError::JobFailed {
+        message: "Use TaskHandler implementation instead".to_string(),
+    })
 }
 
-/// Simple worker implementation that connects to the database and processes
-/// jobs
+/// Real worker implementation using GraphileWorker
 async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
-    // Create the backfill client for database setup (ensures DB is set up)
+    info!("Setting up database connection pool");
+    
+    // Create PostgreSQL connection pool
+    let total_connections = (config.fast_queue_concurrency + config.bulk_queue_concurrency + config.dead_letter_queue_concurrency) as u32;
+    let pg_pool = PgPoolOptions::new()
+        .max_connections(total_connections.max(5)) // Ensure at least 5 connections
+        .connect(&config.database_url)
+        .await?;
+
+    info!("Database connection pool established");
+
+    // Ensure the BackfillClient schema is set up (for job enqueuing compatibility)
     let _client = BackfillClient::new(&config.database_url).await?;
-    info!("Database connection and schema setup completed");
+    info!("Backfill schema initialized");
 
-    // For now, implement a simple polling loop
-    // In a full implementation, we would use GraphileWorker properly
-    info!("Worker started - polling for jobs (mock implementation)");
+    info!("Starting GraphileWorker with configuration:");
+    info!("  Schema: {}", config.schema);
+    info!("  Fast queue concurrency: {}", config.fast_queue_concurrency);
+    info!("  Bulk queue concurrency: {}", config.bulk_queue_concurrency);
+    info!("  Dead letter concurrency: {}", config.dead_letter_queue_concurrency);
+    info!("  Poll interval: {:?}", config.poll_interval);
 
-    loop {
-        // This is a placeholder implementation
-        // A real worker would:
-        // 1. Poll the database for jobs
-        // 2. Process jobs according to priority and queue
-        // 3. Handle retries and error classification
-        // 4. Update job status in the database
+    // Configure and start the GraphileWorker
+    let worker = WorkerOptions::default()
+        .concurrency(config.fast_queue_concurrency)
+        .schema(&config.schema)
+        .poll_interval(config.poll_interval)
+        .define_job::<ExampleJob>()
+        .define_job::<SendEmailJob>()
+        .define_job::<ProcessUserDataJob>()
+        .define_job::<GenerateReportJob>()
+        .pg_pool(pg_pool)
+        .init()
+        .await?;
 
-        tokio::time::sleep(config.poll_interval).await;
+    info!("GraphileWorker initialized successfully");
+    info!("Worker is now ready to process jobs");
 
-        // Check for shutdown signal (non-blocking)
-        // In a real implementation, this would be handled differently
-        // using select! to wait for either jobs or shutdown
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // Continue processing
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Shutdown signal received, stopping worker");
-                break;
-            }
-        }
-    }
+    // Run the worker - this will block and process jobs until shutdown
+    worker.run().await.map_err(|e| BackfillError::WorkerRuntime(e.to_string()))?;
 
+    info!("Worker stopped");
     Ok(())
 }
 
@@ -239,32 +339,39 @@ async fn main() -> Result<(), BackfillError> {
     let config = WorkerConfig::from_env()?;
     info!("Worker configuration loaded: {:#?}", config);
 
-    // Start the worker
-    info!("Starting worker...");
+    // Start the worker with graceful shutdown handling
+    info!("Starting GraphileWorker...");
 
-    let shutdown_timeout = config.shutdown_timeout;
+    // Set up graceful shutdown handling with tokio::select!
+    let shutdown_signal = async {
+        wait_for_shutdown().await;
+        info!("Shutdown signal received, stopping worker gracefully");
+    };
 
-    // Run the worker with graceful shutdown
-    let worker_handle = tokio::spawn(async move {
+    let worker_task = async {
         match run_worker(&config).await {
             Ok(()) => info!("Worker stopped normally"),
-            Err(e) => error!("Worker stopped with error: {}", e),
+            Err(e) => {
+                error!("Worker stopped with error: {}", e);
+                return Err(e);
+            }
         }
-    });
+        Ok(())
+    };
 
-    // Wait for shutdown signal
-    wait_for_shutdown().await;
-
-    // Give the worker time to finish current jobs
-    info!(
-        "Waiting for worker to shutdown gracefully (timeout: {:?})",
-        shutdown_timeout
-    );
-
-    match tokio::time::timeout(shutdown_timeout, worker_handle).await {
-        Ok(_) => info!("Worker shutdown complete"),
-        Err(_) => {
-            warn!("Worker shutdown timed out, forcing exit");
+    // Run worker and wait for either completion or shutdown signal
+    tokio::select! {
+        result = worker_task => {
+            match result {
+                Ok(()) => info!("Worker completed successfully"),
+                Err(e) => error!("Worker failed: {}", e),
+            }
+        }
+        _ = shutdown_signal => {
+            info!("Graceful shutdown initiated");
+            // GraphileWorker should handle graceful shutdown internally
+            // Give it some time to finish current jobs
+            tokio::time::sleep(config.shutdown_timeout).await;
         }
     }
 

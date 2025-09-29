@@ -22,6 +22,8 @@ pub enum BackfillError {
     GraphileWorker(#[from] graphile_worker::errors::GraphileWorkerError),
     #[error(transparent)]
     GraphileBuild(#[from] graphile_worker::builder::WorkerBuildError),
+    #[error("Worker runtime error: {0}")]
+    WorkerRuntime(String),
     #[error(transparent)]
     SqlxError(#[from] sqlx::Error),
     #[error(transparent)]
