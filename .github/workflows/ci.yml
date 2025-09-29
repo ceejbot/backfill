@@ -1,4 +1,4 @@
-name: Test
+name: CI
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
     
     services:
       postgres:
-        image: postgres:15
+        image: postgres:17
         env:
           POSTGRES_DB: backfill_test
           POSTGRES_USER: testuser
