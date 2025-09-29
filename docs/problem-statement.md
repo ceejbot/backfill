@@ -11,10 +11,11 @@
 - We care about performance and memory both, but are willing to use a little more memory to get performance.
 - The queue might be huge at times, such as when we are doing backfill on a new data set, but it'll eventually calm down to a steady rate of incoming work. The system needs to handle both situations well.
 - The system will be running several of these work queues at once, with different requirements on each queue (allowed rate of work, backpressure, retry requirements).
-- We would prefer not invest in a giant queuing system or job runner; we just want to do some internal tasks from services in a distributed system. We are also aware of the dangers of investing too much time writing our own, so we'd prefer to select good existing Rust libraries to help
+- We would prefer not invest in a giant queuing system or job runner; we just want to do some internal tasks from services in a distributed system. We are also aware of the dangers of investing too much time writing our own, so we'd prefer to select good existing Rust libraries to help.
+- We need to think ahead to administrative tools, both web app and cli.
 - We prefer to use well-tested maintained Rust crates in our dependencies.
 - Our async library is `tokio`.
 - Redis is a possible backend as well as Postgres.
 - We prefer [sqlx](https://lib.rs/crates/sqlx) as our relational database client, but might choose to stay flexible.
 - This project must be well-tested.
-- We do integration tests with a live postgres running in Docker, using transactions to clean up after groups of tests. We do not mock postgres or redis.
+- We do integration tests with a live postgres running in Docker, cleaning up after groups of tests. We do not mock postgres or redis.

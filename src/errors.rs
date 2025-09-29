@@ -17,6 +17,10 @@ pub enum BackfillError {
     #[error("Invalid SHUTDOWN_TIMEOUT_SECS: {0}")]
     ShutdownTimeoutParseInt(String),
 
+    // DLQ errors
+    #[error("DLQ job not found with ID: {0}")]
+    DlqJobNotFound(i64),
+
     // External library errors
     #[error(transparent)]
     GraphileWorker(#[from] graphile_worker::errors::GraphileWorkerError),

@@ -3,11 +3,10 @@ use std::time::Duration;
 use backfill::{BackfillClient, BackfillError, WorkerError, IntoTaskHandlerResult, TaskHandler, WorkerContext, WorkerOptions};
 use serde::{Deserialize, Serialize};
 use tokio::signal;
-use tracing::{Level, error, info, span, warn};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 use sqlx::postgres::PgPoolOptions;
+use tracing::{span, info, warn, error, Level};
+
+// Worker binary uses tracing for structured logging
 
 /// Configuration for the worker
 #[derive(Debug, Clone)]
@@ -97,25 +96,41 @@ pub struct ExampleJob {
 impl TaskHandler for ExampleJob {
     const IDENTIFIER: &'static str = "example_job";
 
-    async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        let span = span!(Level::INFO, "example_job", message = %self.message);
+    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        let span = span!(Level::INFO, "example_job", 
+            message = %self.message,
+            job_id = ctx.job().id(),
+            attempt = ctx.job().attempts(),
+            max_attempts = ?ctx.job().max_attempts()
+        );
         let _enter = span.enter();
 
-        info!("Processing example job: {}", self.message);
+        info!(
+            job_id = ctx.job().id(),
+            attempt = ctx.job().attempts(),
+            "Processing example job: {}",
+            self.message
+        );
 
         // Simulate work delay if specified
         if let Some(delay) = self.delay_ms {
+            info!(delay_ms = delay, "Simulating work delay");
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
 
         // Simulate failure if requested (for testing)
         if self.should_fail.unwrap_or(false) {
+            warn!("Job configured to fail for testing purposes");
             return Err(WorkerError::JobFailed {
                 message: "Job was configured to fail".to_string(),
             });
         }
 
-        info!("Example job completed successfully");
+        info!(
+            job_id = ctx.job().id(),
+            processing_time_ms = ?self.delay_ms.unwrap_or(0),
+            "Example job completed successfully"
+        );
         Ok::<(), WorkerError>(())
     }
 }
@@ -251,8 +266,15 @@ async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
     info!("Database connection pool established");
 
     // Ensure the BackfillClient schema is set up (for job enqueuing compatibility)
-    let _client = BackfillClient::new(&config.database_url).await?;
+    let client = BackfillClient::new(&config.database_url).await?;
     info!("Backfill schema initialized");
+
+    // Initialize dead letter queue schema
+    if let Err(e) = client.init_dlq().await {
+        error!(error = %e, "Failed to initialize DLQ schema");
+        return Err(e);
+    }
+    info!("Dead letter queue schema initialized");
 
     info!("Starting GraphileWorker with configuration:");
     info!("  Schema: {}", config.schema);
@@ -284,21 +306,53 @@ async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
     Ok(())
 }
 
-/// Setup tracing for the worker
-fn setup_tracing() -> Result<(), BackfillError> {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("backfill=info,backfill_worker=info"));
+/// Setup logging for the worker with feature-based configuration
+fn setup_logging() -> Result<(), BackfillError> {
+    {
+        use tracing_subscriber::EnvFilter;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_thread_ids(true)
-                .with_level(true)
-                .with_ansi(atty::is(atty::Stream::Stdout)),
-        )
-        .with(filter)
-        .init();
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("backfill=info,backfill_worker=info"));
+
+        // Check if JSON output is requested via environment variable
+        let use_json = std::env::var("LOG_FORMAT")
+            .map(|format| format.to_lowercase() == "json")
+            .unwrap_or(false);
+
+        let subscriber = tracing_subscriber::registry().with(filter);
+
+        if use_json {
+            // JSON structured logging for production
+            subscriber
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_current_span(false)
+                        .with_span_list(true)
+                        .with_target(true)
+                        .with_thread_ids(true)
+                        .with_level(true)
+                        .with_file(false)
+                        .with_line_number(false),
+                )
+                .init();
+        } else {
+            // Human-readable logging for development
+            subscriber
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_target(false)
+                        .with_thread_ids(true)
+                        .with_level(true)
+                        .with_ansi(atty::is(atty::Stream::Stdout))
+                        .with_file(false)
+                        .with_line_number(false),
+                )
+                .init();
+        }
+    }
 
     Ok(())
 }
@@ -330,14 +384,27 @@ async fn wait_for_shutdown() {
 
 #[tokio::main]
 async fn main() -> Result<(), BackfillError> {
-    // Setup tracing first
-    setup_tracing()?;
+    // Setup logging first
+    setup_logging()?;
 
-    info!("Starting backfill worker");
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        name = env!("CARGO_PKG_NAME"),
+        "Starting backfill worker"
+    );
 
     // Load configuration
     let config = WorkerConfig::from_env()?;
-    info!("Worker configuration loaded: {:#?}", config);
+    info!(
+        database_url = %config.database_url.split('@').last().unwrap_or("redacted"),
+        schema = %config.schema,
+        fast_concurrency = config.fast_queue_concurrency,
+        bulk_concurrency = config.bulk_queue_concurrency,
+        dlq_concurrency = config.dead_letter_queue_concurrency,
+        poll_interval_ms = config.poll_interval.as_millis(),
+        shutdown_timeout_secs = config.shutdown_timeout.as_secs(),
+        "Worker configuration loaded"
+    );
 
     // Start the worker with graceful shutdown handling
     info!("Starting GraphileWorker...");
