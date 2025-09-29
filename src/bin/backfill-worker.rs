@@ -7,13 +7,15 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, error, info, span, warn};
+use tracing::{Level, span};
+use veil::Redact;
 
 // Worker binary uses tracing for structured logging
 
 /// Configuration for the worker
-#[derive(Debug, Clone)]
+#[derive(Clone, Redact)]
 pub struct WorkerConfig {
+    #[redact(partial)]
     pub database_url: String,
     pub schema: String,
     pub fast_queue_concurrency: usize,
@@ -117,31 +119,31 @@ impl TaskHandler for ExampleJob {
         );
         let _enter = span.enter();
 
-        info!(
-            job_id = ctx.job().id(),
-            attempt = ctx.job().attempts(),
-            "Processing example job: {}",
-            self.message
+        log::info!(
+            "Processing example job: message='{}'; job_id='{}'; attempt_num='{}';",
+            self.message,
+            ctx.job().id(),
+            ctx.job().attempts()
         );
 
         // Simulate work delay if specified
         if let Some(delay) = self.delay_ms {
-            info!(delay_ms = delay, "Simulating work delay");
+            log::info!("Simulating work delay; delay_ms='{delay}';");
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
 
         // Simulate failure if requested (for testing)
         if self.should_fail.unwrap_or(false) {
-            warn!("Job configured to fail for testing purposes");
+            log::warn!("Job configured to fail for testing purposes");
             return Err(WorkerError::JobFailed {
                 message: "Job was configured to fail".to_string(),
             });
         }
 
-        info!(
-            job_id = ctx.job().id(),
-            processing_time_ms = ?self.delay_ms.unwrap_or(0),
-            "Example job completed successfully"
+        log::info!(
+            "Example job completed successfully; job_id='{}'; processing_time_ms='{}';",
+            ctx.job().id(),
+            self.delay_ms.unwrap_or(0),
         );
         Ok::<(), WorkerError>(())
     }
@@ -163,7 +165,7 @@ impl TaskHandler for SendEmailJob {
         let span = span!(Level::INFO, "send_email", to = %self.to, subject = %self.subject);
         let _enter = span.enter();
 
-        info!("Sending email to: {}", self.to);
+        log::info!("Sending email to: {}", self.to);
 
         // Simulate email sending (in real implementation, integrate with email service)
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -175,7 +177,7 @@ impl TaskHandler for SendEmailJob {
             });
         }
 
-        info!("Email sent successfully to {}", self.to);
+        log::info!("Email sent successfully to {}", self.to);
         Ok::<(), WorkerError>(())
     }
 }
@@ -195,13 +197,13 @@ impl TaskHandler for ProcessUserDataJob {
         let span = span!(Level::INFO, "process_user_data", user_id = %self.user_id, data_type = %self.data_type);
         let _enter = span.enter();
 
-        info!("Processing {} data for user: {}", self.data_type, self.user_id);
+        log::info!("Processing {} data for user: {}", self.data_type, self.user_id);
 
         // Simulate data processing work
         let processing_time = self.batch_size.unwrap_or(10) * 50; // 50ms per item
         tokio::time::sleep(Duration::from_millis(processing_time as u64)).await;
 
-        info!("User data processing completed for user: {}", self.user_id);
+        log::info!("User data processing completed for user: {}", self.user_id);
         Ok::<(), WorkerError>(())
     }
 }
@@ -222,9 +224,10 @@ impl TaskHandler for GenerateReportJob {
         let span = span!(Level::INFO, "generate_report", report_type = %self.report_type, format = %self.output_format);
         let _enter = span.enter();
 
-        info!(
+        log::info!(
             "Generating {} report for date range: {}",
-            self.report_type, self.date_range
+            self.report_type,
+            self.date_range
         );
 
         // Simulate report generation (could be CPU intensive)
@@ -237,11 +240,11 @@ impl TaskHandler for GenerateReportJob {
             });
         }
 
-        info!("Report generated successfully: {} format", self.output_format);
+        log::info!("Report generated successfully: {} format", self.output_format);
 
         // Send to recipients (simulate)
         for recipient in &self.recipients {
-            info!("Sending report to: {}", recipient);
+            log::info!("Sending report to: {}", recipient);
         }
 
         Ok::<(), WorkerError>(())
@@ -251,17 +254,17 @@ impl TaskHandler for GenerateReportJob {
 /// Simple job processor function for demonstration
 #[allow(dead_code)]
 async fn process_example_job(payload: serde_json::Value) -> Result<(), WorkerError> {
-    let span = span!(Level::INFO, "process_example_job");
+    let span = tracing::span!(Level::INFO, "process_example_job");
     let _enter = span.enter();
 
     // Deserialize the payload
     let job: ExampleJob = serde_json::from_value(payload)?;
 
-    info!("Processing example job: {}", job.message);
+    log::info!("Processing example job: {}", job.message);
 
     // This function is now deprecated since we use TaskHandler directly
     // Left for compatibility/example purposes
-    warn!("process_example_job called - use TaskHandler directly instead");
+    log::warn!("process_example_job called - use TaskHandler directly instead");
     Err(WorkerError::JobFailed {
         message: "Use TaskHandler implementation instead".to_string(),
     })
@@ -269,7 +272,7 @@ async fn process_example_job(payload: serde_json::Value) -> Result<(), WorkerErr
 
 /// Real worker implementation using GraphileWorker
 async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
-    info!("Setting up database connection pool");
+    log::info!("Setting up database connection pool");
 
     // Create PostgreSQL connection pool
     let total_connections =
@@ -279,25 +282,25 @@ async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
         .connect(&config.database_url)
         .await?;
 
-    info!("Database connection pool established");
+    log::info!("Database connection pool established");
 
     // Ensure the BackfillClient schema is set up (for job enqueuing compatibility)
     let client = BackfillClient::new(&config.database_url).await?;
-    info!("Backfill schema initialized");
+    log::info!("Backfill schema initialized");
 
     // Initialize dead letter queue schema
     if let Err(e) = client.init_dlq().await {
-        error!(error = %e, "Failed to initialize DLQ schema");
+        log::error!("Failed to initialize DLQ schema; {e:#?}");
         return Err(e);
     }
-    info!("Dead letter queue schema initialized");
+    log::info!("Dead letter queue schema initialized");
 
-    info!("Starting GraphileWorker with configuration:");
-    info!("  Schema: {}", config.schema);
-    info!("  Fast queue concurrency: {}", config.fast_queue_concurrency);
-    info!("  Bulk queue concurrency: {}", config.bulk_queue_concurrency);
-    info!("  Dead letter concurrency: {}", config.dead_letter_queue_concurrency);
-    info!("  Poll interval: {:?}", config.poll_interval);
+    log::info!("Starting GraphileWorker with configuration:");
+    log::info!("  Schema: {}", config.schema);
+    log::info!("  Fast queue concurrency: {}", config.fast_queue_concurrency);
+    log::info!("  Bulk queue concurrency: {}", config.bulk_queue_concurrency);
+    log::info!("  Dead letter concurrency: {}", config.dead_letter_queue_concurrency);
+    log::info!("  Poll interval: {:?}", config.poll_interval);
 
     // Configure and start the GraphileWorker
     let worker = WorkerOptions::default()
@@ -312,21 +315,21 @@ async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
         .init()
         .await?;
 
-    info!("GraphileWorker initialized successfully");
+    log::info!("GraphileWorker initialized successfully");
 
     // Set up cancellation token for graceful shutdown
     let cancellation_token = CancellationToken::new();
     let dlq_cancellation_token = cancellation_token.clone();
 
     // Start the DLQ processor background task
-    info!(
-        dlq_interval_secs = config.dlq_processor_interval.as_secs(),
-        "Starting DLQ processor background task"
+    log::info!(
+        "Starting DLQ processor background task; dlq_interval_secs='{}';",
+        config.dlq_processor_interval.as_secs()
     );
 
     let dlq_processor_handle = client.start_dlq_processor(config.dlq_processor_interval, dlq_cancellation_token);
 
-    info!("Worker is now ready to process jobs");
+    log::info!("Worker is now ready to process jobs");
 
     // Run the worker - this will block and process jobs until shutdown
     let worker_result = worker
@@ -339,63 +342,12 @@ async fn run_worker(config: &WorkerConfig) -> Result<(), BackfillError> {
 
     // Wait for DLQ processor to finish (with timeout)
     match tokio::time::timeout(Duration::from_secs(5), dlq_processor_handle).await {
-        Ok(_) => info!("DLQ processor stopped gracefully"),
-        Err(_) => warn!("DLQ processor shutdown timeout - may still be running"),
+        Ok(_) => log::info!("DLQ processor stopped gracefully"),
+        Err(_) => log::warn!("DLQ processor shutdown timeout - may still be running"),
     }
 
-    info!("Worker stopped");
+    log::info!("Worker stopped");
     worker_result?;
-    Ok(())
-}
-
-/// Setup logging for the worker with feature-based configuration
-fn setup_logging() -> Result<(), BackfillError> {
-    {
-        use tracing_subscriber::EnvFilter;
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-
-        let filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("backfill=info,backfill_worker=info"));
-
-        // Check if JSON output is requested via environment variable
-        let use_json = std::env::var("LOG_FORMAT")
-            .map(|format| format.to_lowercase() == "json")
-            .unwrap_or(false);
-
-        let subscriber = tracing_subscriber::registry().with(filter);
-
-        if use_json {
-            // JSON structured logging for production
-            subscriber
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .json()
-                        .with_current_span(false)
-                        .with_span_list(true)
-                        .with_target(true)
-                        .with_thread_ids(true)
-                        .with_level(true)
-                        .with_file(false)
-                        .with_line_number(false),
-                )
-                .init();
-        } else {
-            // Human-readable logging for development
-            subscriber
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_target(false)
-                        .with_thread_ids(true)
-                        .with_level(true)
-                        .with_ansi(atty::is(atty::Stream::Stdout))
-                        .with_file(false)
-                        .with_line_number(false),
-                )
-                .init();
-        }
-    }
-
     Ok(())
 }
 
@@ -421,48 +373,35 @@ async fn wait_for_shutdown() {
         _ = terminate => {},
     }
 
-    info!("Shutdown signal received");
+    log::info!("Shutdown signal received");
 }
 
 #[tokio::main]
 async fn main() -> Result<(), BackfillError> {
-    // Setup logging first
-    setup_logging()?;
-
-    info!(
-        version = env!("CARGO_PKG_VERSION"),
-        name = env!("CARGO_PKG_NAME"),
-        "Starting backfill worker"
+    log::info!(
+        "Starting backfill worker; name='{}'; version='{}';",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
     );
 
     // Load configuration
     let config = WorkerConfig::from_env()?;
-    info!(
-        database_url = %config.database_url.split('@').last().unwrap_or("redacted"),
-        schema = %config.schema,
-        fast_concurrency = config.fast_queue_concurrency,
-        bulk_concurrency = config.bulk_queue_concurrency,
-        dlq_concurrency = config.dead_letter_queue_concurrency,
-        poll_interval_ms = config.poll_interval.as_millis(),
-        shutdown_timeout_secs = config.shutdown_timeout.as_secs(),
-        dlq_processor_interval_secs = config.dlq_processor_interval.as_secs(),
-        "Worker configuration loaded"
-    );
+    log::info!("Worker configuration loaded: {config:#?}"); // db uri is redacted
 
     // Start the worker with graceful shutdown handling
-    info!("Starting GraphileWorker...");
+    log::info!("Starting GraphileWorker...");
 
     // Set up graceful shutdown handling with tokio::select!
     let shutdown_signal = async {
         wait_for_shutdown().await;
-        info!("Shutdown signal received, stopping worker gracefully");
+        log::info!("Shutdown signal received, stopping worker gracefully");
     };
 
     let worker_task = async {
         match run_worker(&config).await {
-            Ok(()) => info!("Worker stopped normally"),
+            Ok(()) => log::info!("Worker stopped normally"),
             Err(e) => {
-                error!("Worker stopped with error: {}", e);
+                log::error!("Worker stopped with error: {}", e);
                 return Err(e);
             }
         }
@@ -473,19 +412,19 @@ async fn main() -> Result<(), BackfillError> {
     tokio::select! {
         result = worker_task => {
             match result {
-                Ok(()) => info!("Worker completed successfully"),
-                Err(e) => error!("Worker failed: {}", e),
+                Ok(()) => log::info!("Worker completed successfully"),
+                Err(e) => log::error!("Worker failed: {}", e),
             }
         }
         _ = shutdown_signal => {
-            info!("Graceful shutdown initiated");
+            log::info!("Graceful shutdown initiated");
             // GraphileWorker should handle graceful shutdown internally
             // Give it some time to finish current jobs
             tokio::time::sleep(config.shutdown_timeout).await;
         }
     }
 
-    info!("Backfill worker stopped");
+    log::info!("Backfill worker stopped");
     Ok(())
 }
 
