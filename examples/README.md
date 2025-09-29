@@ -34,5 +34,15 @@ Key environment variables:
 - **Named queues**: Fast, Bulk, DeadLetter, Custom(name)
 - **Scheduling**: Immediate or delayed execution with `run_at`
 - **Idempotency**: Use `job_key` for deduplication
+- **Exponential backoff**: Built-in retry policies with jitter to prevent thundering herds
 - **Error handling**: Automatic retry classification
 - **Monitoring**: Comprehensive logging and tracing
+
+## Retry Policies
+
+The example demonstrates three built-in retry policies plus custom configuration:
+
+- **Fast retries**: 3 attempts, 100ms-30s delays, for high-priority jobs
+- **Aggressive retries**: 12 attempts, 500ms-600s delays, for critical jobs  
+- **Conservative retries**: 5 attempts, 5s-1800s delays, for bulk processing
+- **Custom policies**: Configure attempts, delays, backoff multiplier, and jitter

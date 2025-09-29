@@ -1,4 +1,4 @@
-use backfill::{BackfillClient, JobSpec, Priority, Queue, enqueue_fast, enqueue_bulk};
+use backfill::{BackfillClient, JobSpec, Priority, Queue, RetryPolicy, enqueue_fast, enqueue_bulk, enqueue_fast_with_retries, enqueue_critical, enqueue_bulk_with_retries};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -165,6 +165,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("💥 Enqueued failing ExampleJob for error testing (job_id: {})", job.id());
 
+    println!("\n🔄 Demonstrating exponential backoff retry policies...");
+
+    // Enqueue a critical job with aggressive retries (12 attempts, up to 10 minutes)
+    let critical_job = SendEmailJob {
+        to: "admin@example.com".to_string(),
+        subject: "CRITICAL ALERT: System Issue Detected".to_string(),
+        body: "This email must be delivered - using aggressive retry policy.".to_string(),
+        template: Some("alert".to_string()),
+    };
+
+    let job = enqueue_critical(
+        &client,
+        "send_email",
+        &critical_job,
+        Some("critical-alert-001".to_string()),
+    )
+    .await?;
+    println!("🚨 Enqueued critical alert with aggressive retries (job_id: {})", job.id());
+
+    // Enqueue a job with fast retries for quick turnaround
+    let notification_job = ExampleJob {
+        message: "Quick notification with fast retry policy".to_string(),
+        delay_ms: Some(100),
+        should_fail: Some(false),
+    };
+
+    let job = enqueue_fast_with_retries(
+        &client,
+        "example_job",
+        &notification_job,
+        Some("fast-notification".to_string()),
+    )
+    .await?;
+    println!("⚡ Enqueued fast notification with quick retries (job_id: {})", job.id());
+
+    // Enqueue a bulk job with conservative retries
+    let bulk_job = ProcessUserDataJob {
+        user_id: "user-789".to_string(),
+        data_type: "bulk_export".to_string(),
+        batch_size: Some(1000),
+    };
+
+    let job = enqueue_bulk_with_retries(
+        &client,
+        "process_user_data",
+        &bulk_job,
+        Some("bulk-export-789".to_string()),
+    )
+    .await?;
+    println!("📦 Enqueued bulk job with conservative retries (job_id: {})", job.id());
+
+    // Enqueue a job with custom retry policy
+    let custom_retry_policy = RetryPolicy::new(
+        6,                                    // 6 attempts
+        std::time::Duration::from_millis(500), // Start with 500ms
+        std::time::Duration::from_secs(60),   // Cap at 1 minute
+        1.8,                                  // 1.8x multiplier
+    ).with_jitter(0.2); // 20% jitter
+
+    let custom_job = GenerateReportJob {
+        report_type: "analytics_summary".to_string(),
+        date_range: "last_7_days".to_string(),
+        output_format: "json".to_string(),
+        recipients: vec!["data-team@example.com".to_string()],
+    };
+
+    let job = client
+        .enqueue(
+            "generate_report",
+            &custom_job,
+            JobSpec {
+                priority: Priority::BULK_DEFAULT,
+                queue: Queue::Custom("analytics".to_string()),
+                job_key: Some("weekly-analytics".to_string()),
+                ..Default::default()
+            }.with_retry_policy(custom_retry_policy),
+        )
+        .await?;
+    println!("📊 Enqueued analytics job with custom retry policy (job_id: {})", job.id());
+
     println!("\n🎯 All jobs enqueued successfully!");
     println!("\n🔧 To process these jobs, run the worker:");
     println!("   cargo run --bin backfill-worker");
@@ -173,6 +253,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   RUST_LOG=backfill=info,backfill_worker=info");
     println!("   FAST_QUEUE_CONCURRENCY=5");
     println!("   BULK_QUEUE_CONCURRENCY=3");
+
+    println!("\n📈 Retry policies used:");
+    println!("   🚨 Critical: 12 attempts, 500ms-600s, 1.5x backoff, 15% jitter");
+    println!("   ⚡ Fast: 3 attempts, 100ms-30s, 2.0x backoff, 10% jitter");
+    println!("   📦 Conservative: 5 attempts, 5s-1800s, 2.5x backoff, 20% jitter"); 
+    println!("   📊 Custom: 6 attempts, 500ms-60s, 1.8x backoff, 20% jitter");
+    println!("\nThese policies prevent thundering herds and provide appropriate retry behavior for different job types!");
 
     Ok(())
 }
