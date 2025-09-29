@@ -1,8 +1,9 @@
 //! Example Axum server with integrated backfill admin API
 //!
 //! This example demonstrates how to integrate the backfill admin API into
-//! an existing Axum application. The admin endpoints are mounted at `/admin/backfill`
-//! and provide comprehensive job queue management capabilities.
+//! an existing Axum application. The admin endpoints are mounted at
+//! `/admin/backfill` and provide comprehensive job queue management
+//! capabilities.
 //!
 //! To run this example:
 //! ```bash
@@ -13,10 +14,10 @@
 //! ```bash
 //! # Health check
 //! curl http://localhost:3000/admin/backfill/health
-//! 
+//!
 //! # System status
 //! curl http://localhost:3000/admin/backfill/status
-//! 
+//!
 //! # Enqueue a job
 //! curl -X POST http://localhost:3000/admin/backfill/jobs \
 //!   -H "Content-Type: application/json" \
@@ -29,20 +30,18 @@
 //! curl http://localhost:3000/admin/backfill/dlq/stats
 //! ```
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::{get, post},
-    Router,
-};
-use backfill::{
-    admin::{BackfillAdminState, create_admin_router},
-    BackfillClient, BackfillError, IntoTaskHandlerResult, JobSpec, Priority, Queue, TaskHandler, WorkerContext,
-};
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio::{net::TcpListener, signal};
+
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::Json;
+use axum::routing::{get, post};
+use backfill::admin::{BackfillAdminState, create_admin_router};
+use backfill::{BackfillClient, IntoTaskHandlerResult, JobSpec, Priority, Queue, TaskHandler, WorkerContext};
+use serde::{Deserialize, Serialize};
+use tokio::net::TcpListener;
+use tokio::signal;
 use tracing::{error, info, warn};
 
 /// Application state that implements BackfillAdminState
@@ -70,16 +69,16 @@ impl TaskHandler for SendEmailJob {
 
     async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
         info!("Sending email to: {}", self.to);
-        
+
         // Simulate email sending
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         if !self.to.contains('@') {
             return Err(backfill::WorkerError::InvalidInput {
                 message: format!("Invalid email address: {}", self.to),
             });
         }
-        
+
         info!("Email sent successfully to: {}", self.to);
         Ok(())
     }
@@ -129,10 +128,8 @@ fn create_app(state: AppState) -> Router {
         // Application endpoints
         .route("/info", get(app_info))
         .route("/api/notify", post(send_notification))
-        
         // Mount the backfill admin API at /admin/backfill
         .nest("/admin/backfill", create_admin_router())
-        
         // Add CORS middleware for browser access (optional)
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -142,12 +139,10 @@ fn create_app(state: AppState) -> Router {
                     axum::http::Method::POST,
                     axum::http::Method::DELETE,
                 ])
-                .allow_headers(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
         )
-        
         // Add logging middleware
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        
         .with_state(state)
 }
 
@@ -182,8 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting backfill admin server example");
 
     // Get database URL from environment
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://localhost/backfill".to_string());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://localhost/backfill".to_string());
 
     // Create backfill client
     let client = BackfillClient::new(&database_url).await?;
@@ -194,9 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create application state
-    let state = AppState {
-        backfill: client,
-    };
+    let state = AppState { backfill: client };
 
     // Create router
     let app = create_app(state);
@@ -204,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start server
     let listener = TcpListener::bind("127.0.0.1:3000").await?;
     let addr = listener.local_addr()?;
-    
+
     info!("Server listening on http://{}", addr);
     info!("API endpoints:");
     info!("  App info:       GET  http://{}/info", addr);

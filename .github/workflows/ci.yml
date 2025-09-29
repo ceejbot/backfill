@@ -57,16 +57,16 @@ jobs:
                   fi
 
             - name: Check formatting
-              run: cargo +nightly fmt --check --all
+              run: cargo +nightly fmt --check --all -F axum
 
             - name: Run clippy
               run: cargo +stable clippy --all-targets -- -D warnings
 
             - name: Check compilation
-              run: cargo check --all-targets
+              run: cargo check --all-targets -F axum
 
             - name: Run tests
-              run: cargo nextest run --all-targets -- --skip no_ci
+              run: cargo nextest run --all-targets -F axum -- --skip no_ci
               env:
                   DATABASE_URL: postgresql://testuser@localhost:5432/backfill_test
 

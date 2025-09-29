@@ -38,17 +38,16 @@
 //! }
 //! ```
 
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::Json,
-    routing::{delete, get, post},
-    Router,
-};
+use axum::Router;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::Json;
+use axum::routing::{delete, get, post};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use crate::{client::DlqFilter, BackfillClient};
+use crate::BackfillClient;
+use crate::client::DlqFilter;
 
 /// Trait that application state must implement to use the admin API
 ///
@@ -155,16 +154,13 @@ where
         // Health and status endpoints
         .route("/health", get(health_check::<S>))
         .route("/status", get(system_status::<S>))
-        
         // Job management endpoints
         .route("/jobs", post(enqueue_job::<S>))
         .route("/jobs/:job_id", get(get_job::<S>))
         .route("/jobs/:job_id/cancel", delete(cancel_job::<S>))
-        
-        // Queue management endpoints  
+        // Queue management endpoints
         .route("/queues", get(list_queues::<S>))
         .route("/queues/:queue_name/stats", get(queue_stats::<S>))
-        
         // Dead Letter Queue management
         .route("/dlq", get(list_dlq_jobs::<S>))
         .route("/dlq/stats", get(dlq_stats::<S>))
@@ -184,19 +180,17 @@ where
         version: env!("CARGO_PKG_VERSION").to_string(),
         timestamp: chrono::Utc::now(),
     };
-    
+
     Ok(Json(response))
 }
 
 /// System status endpoint - GET /status  
-async fn system_status<S>(
-    State(state): State<S>,
-) -> Result<Json<SystemStatus>, (StatusCode, Json<ErrorResponse>)>
+async fn system_status<S>(State(state): State<S>) -> Result<Json<SystemStatus>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
     let _client = state.backfill_client();
-    
+
     // For now, return a basic status. In a real implementation, you'd query
     // the database for actual queue statistics
     let status = SystemStatus {
@@ -204,7 +198,7 @@ where
             QueueStatus {
                 queue_name: "fast".to_string(),
                 pending_jobs: 0,
-                active_jobs: 0, 
+                active_jobs: 0,
                 completed_jobs: 0,
                 failed_jobs: 0,
             },
@@ -212,7 +206,7 @@ where
                 queue_name: "bulk".to_string(),
                 pending_jobs: 0,
                 active_jobs: 0,
-                completed_jobs: 0, 
+                completed_jobs: 0,
                 failed_jobs: 0,
             },
         ],
@@ -220,7 +214,7 @@ where
         dlq_job_count: 0,
         total_jobs: 0,
     };
-    
+
     info!("Retrieved system status: {} queues", status.queues.len());
     Ok(Json(status))
 }
@@ -234,12 +228,12 @@ where
     S: BackfillAdminState,
 {
     let client = state.backfill_client();
-    
+
     info!("Enqueueing job: task={}, queue={:?}", req.task_identifier, req.queue);
-    
+
     // Build job spec from request
     let mut spec = crate::JobSpec::default();
-    
+
     if let Some(queue) = req.queue {
         spec.queue = match queue.as_str() {
             "fast" => crate::Queue::Fast,
@@ -248,23 +242,23 @@ where
             custom => crate::Queue::Custom(custom.to_string()),
         };
     }
-    
+
     if let Some(priority) = req.priority {
         spec.priority = crate::Priority(priority as i16);
     }
-    
+
     if let Some(max_attempts) = req.max_attempts {
         spec.max_attempts = Some(max_attempts);
     }
-    
+
     if let Some(job_key) = req.job_key {
         spec.job_key = Some(job_key);
     }
-    
+
     if let Some(run_at) = req.run_at {
         spec.run_at = Some(run_at);
     }
-    
+
     match client.enqueue(&req.task_identifier, &req.payload, spec).await {
         Ok(job) => {
             let response = EnqueueJobResponse {
@@ -272,7 +266,7 @@ where
                 status: "enqueued".to_string(),
                 enqueued_at: chrono::Utc::now(),
             };
-            
+
             info!("Successfully enqueued job: id={}", job.id());
             Ok(Json(response))
         }
@@ -299,7 +293,10 @@ where
     warn!("Get job endpoint not yet implemented: job_id={}", job_id);
     Err((
         StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResponse::new("Job retrieval not yet implemented", "NOT_IMPLEMENTED")),
+        Json(ErrorResponse::new(
+            "Job retrieval not yet implemented",
+            "NOT_IMPLEMENTED",
+        )),
     ))
 }
 
@@ -316,14 +313,15 @@ where
     warn!("Cancel job endpoint not yet implemented: job_id={}", job_id);
     Err((
         StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResponse::new("Job cancellation not yet implemented", "NOT_IMPLEMENTED")),
+        Json(ErrorResponse::new(
+            "Job cancellation not yet implemented",
+            "NOT_IMPLEMENTED",
+        )),
     ))
 }
 
 /// List queues endpoint - GET /queues
-async fn list_queues<S>(
-    State(_state): State<S>,
-) -> Result<Json<Vec<QueueStatus>>, (StatusCode, Json<ErrorResponse>)>
+async fn list_queues<S>(State(_state): State<S>) -> Result<Json<Vec<QueueStatus>>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
@@ -345,7 +343,7 @@ where
             failed_jobs: 0,
         },
     ];
-    
+
     info!("Listed {} queues", queues.len());
     Ok(Json(queues))
 }
@@ -367,7 +365,7 @@ where
         completed_jobs: 0,
         failed_jobs: 0,
     };
-    
+
     info!("Retrieved stats for queue: {}", queue_name);
     Ok(Json(stats))
 }
@@ -381,7 +379,7 @@ where
     S: BackfillAdminState,
 {
     let client = state.backfill_client();
-    
+
     let filter = DlqFilter {
         queue_name: params.queue_name,
         task_identifier: params.task_identifier,
@@ -390,9 +388,12 @@ where
         limit: Some(params.limit.unwrap_or(50)),
         offset: Some(params.offset.unwrap_or(0)),
     };
-    
-    info!("Listing DLQ jobs with filter: limit={:?}, offset={:?}", filter.limit, filter.offset);
-    
+
+    info!(
+        "Listing DLQ jobs with filter: limit={:?}, offset={:?}",
+        filter.limit, filter.offset
+    );
+
     match client.list_dlq_jobs(filter).await {
         Ok(job_list) => Ok(Json(serde_json::json!({
             "jobs": job_list.jobs,
@@ -410,14 +411,12 @@ where
 }
 
 /// DLQ stats endpoint - GET /dlq/stats
-async fn dlq_stats<S>(
-    State(state): State<S>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)>
+async fn dlq_stats<S>(State(state): State<S>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
     let client = state.backfill_client();
-    
+
     match client.dlq_stats().await {
         Ok(stats) => {
             info!("Retrieved DLQ stats: total_jobs={}", stats.total_jobs);
@@ -442,7 +441,7 @@ where
     S: BackfillAdminState,
 {
     let client = state.backfill_client();
-    
+
     match client.get_dlq_job(dlq_id).await {
         Ok(Some(job)) => {
             info!("Retrieved DLQ job: id={}", dlq_id);
@@ -474,7 +473,7 @@ where
     S: BackfillAdminState,
 {
     let client = state.backfill_client();
-    
+
     match client.delete_dlq_job(dlq_id).await {
         Ok(true) => {
             info!("Successfully deleted DLQ job: id={}", dlq_id);
@@ -506,10 +505,14 @@ where
     S: BackfillAdminState,
 {
     let client = state.backfill_client();
-    
+
     match client.requeue_dlq_job(dlq_id, None).await {
         Ok(job) => {
-            info!("Successfully requeued DLQ job: dlq_id={}, new_job_id={}", dlq_id, job.id());
+            info!(
+                "Successfully requeued DLQ job: dlq_id={}, new_job_id={}",
+                dlq_id,
+                job.id()
+            );
             Ok(Json(serde_json::json!({
                 "job_id": job.id(),
                 "status": "requeued",
@@ -534,14 +537,12 @@ where
 }
 
 /// Cleanup DLQ endpoint - POST /dlq/cleanup
-async fn cleanup_dlq<S>(
-    State(state): State<S>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)>
+async fn cleanup_dlq<S>(State(state): State<S>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
     let _client = state.backfill_client();
-    
+
     // This would implement batch cleanup of old DLQ jobs
     // For now, return a placeholder
     warn!("DLQ cleanup endpoint not yet implemented");

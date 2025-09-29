@@ -5,7 +5,7 @@ _help:
 
 # Run all tests using nextest.
 test:
-	cargo nextest run
+	cargo nextest run -F axum
 
 # get a testing coverage report
 coverage:
@@ -17,11 +17,11 @@ fmt:
 
 # Run the same checks we run in CI. Requires nightly.
 ci: test fmt
-	cargo clippy --all-targets
+	cargo clippy --all-targets  -F axum
 
 # Auto-fix clippy complaints.
 lint:
-	cargo clippy --fix --all-targets
+	cargo clippy --fix --all-targets  -F axum
 
 # Install required tools
 setup:
