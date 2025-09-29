@@ -1,5 +1,9 @@
 # backfill
 
+[![CI](https://github.com/ceejbot/backfill/workflows/CI/badge.svg)](https://github.com/ceejbot/backfill/actions)
+[![codecov](https://codecov.io/gh/ceejbot/backfill/branch/latest/graph/badge.svg)](https://codecov.io/gh/ceejbot/backfill)
+[![Coverage](https://img.shields.io/badge/coverage-51.94%25-orange)](https://github.com/ceejbot/backfill/actions)
+
 A boringly-named priority queue system for doing async work. Wraps some carefully-chosen crates to do things the way I want to do them. It's unlikely you'll want to do things exactly this way, but perhaps you can learn by reading the code, or get a jumpstart by borrowing open-source code, or something like that.
 
 ## What it does
