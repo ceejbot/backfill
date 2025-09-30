@@ -25,6 +25,22 @@ Features:
 
 Look at the `examples/` directory and the readme there for practical usage examples.
 
+## Documentation
+
+### Core Guides
+
+- **[Dead Letter Queue (DLQ) Guide](docs/DLQ.md)** - Comprehensive guide to handling failed jobs, including:
+  - How the DLQ works and why it's essential
+  - Client API and HTTP admin API usage
+  - Operational best practices for production
+  - Monitoring, alerting, and troubleshooting
+  - Common workflows for handling failures
+- **[Admin API Reference](docs/ADMIN_API.md)** - HTTP API for job management and monitoring
+- **[Database Setup](docs/DATABASE_SETUP.md)** - PostgreSQL configuration and schema management
+- **[DLQ Migrations](docs/DLQ_MIGRATIONS.md)** - Migration strategies for the DLQ schema
+- **[SQLx Setup](docs/SQLX_SETUP.md)** - Compile-time query verification setup
+- **[Testing Guide](docs/TESTING.md)** - Testing strategies for workers and jobs
+
 ## Configuration and setup
 
 All configuration is passed in via environment variables:

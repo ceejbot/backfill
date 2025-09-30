@@ -419,7 +419,10 @@ where
             info!("Retrieved DLQ stats: total_jobs={}", stats.total_jobs);
             Ok(Json(serde_json::to_value(stats).map_err(|e| {
                 error!("Failed to serialize DLQ stats: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse::new("Serialization error", "SERIALIZATION_FAILED")))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Serialization error", "SERIALIZATION_FAILED")),
+                )
             })?))
         }
         Err(e) => {
@@ -447,7 +450,10 @@ where
             info!("Retrieved DLQ job: id={}", dlq_id);
             Ok(Json(serde_json::to_value(job).map_err(|e| {
                 error!("Failed to serialize DLQ job: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse::new("Serialization error", "SERIALIZATION_FAILED")))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Serialization error", "SERIALIZATION_FAILED")),
+                )
             })?))
         }
         Ok(None) => {
