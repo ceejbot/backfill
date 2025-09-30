@@ -152,7 +152,7 @@ where
 {
     Router::new()
         // Health and status endpoints
-        .route("/health", get(health_check::<S>))
+        .route("/health", get(health_check))
         .route("/status", get(system_status::<S>))
         // Job management endpoints
         .route("/jobs", post(enqueue_job::<S>))
@@ -171,10 +171,7 @@ where
 }
 
 /// Health check endpoint - GET /health
-async fn health_check<S>() -> Result<Json<HealthResponse>, StatusCode>
-where
-    S: BackfillAdminState,
-{
+async fn health_check() -> Result<Json<HealthResponse>, StatusCode> {
     let response = HealthResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -420,7 +417,10 @@ where
     match client.dlq_stats().await {
         Ok(stats) => {
             info!("Retrieved DLQ stats: total_jobs={}", stats.total_jobs);
-            Ok(Json(serde_json::to_value(stats).unwrap()))
+            Ok(Json(serde_json::to_value(stats).map_err(|e| {
+                error!("Failed to serialize DLQ stats: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse::new("Serialization error", "SERIALIZATION_FAILED")))
+            })?))
         }
         Err(e) => {
             error!("Failed to get DLQ stats: {}", e);
@@ -445,7 +445,10 @@ where
     match client.get_dlq_job(dlq_id).await {
         Ok(Some(job)) => {
             info!("Retrieved DLQ job: id={}", dlq_id);
-            Ok(Json(serde_json::to_value(job).unwrap()))
+            Ok(Json(serde_json::to_value(job).map_err(|e| {
+                error!("Failed to serialize DLQ job: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse::new("Serialization error", "SERIALIZATION_FAILED")))
+            })?))
         }
         Ok(None) => {
             warn!("DLQ job not found: id={}", dlq_id);
