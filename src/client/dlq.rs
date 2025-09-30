@@ -314,7 +314,19 @@ impl BackfillClient {
         };
 
         // Enqueue the job
-        let job = self.enqueue(&dlq_job.task_identifier, &dlq_job.payload, spec).await?;
+        let job = self
+            .enqueue(&dlq_job.task_identifier, &dlq_job.payload, spec.clone())
+            .await?;
+
+        // Record metrics
+        crate::metrics::record_dlq_job_requeued(&dlq_job.task_identifier, spec.queue.as_str());
+
+        tracing::info!(
+            dlq_id = dlq_id,
+            job_id = job.id(),
+            task = %dlq_job.task_identifier,
+            "Job requeued from DLQ"
+        );
 
         // Update the DLQ record
         let update_query = format!(
@@ -339,10 +351,28 @@ impl BackfillClient {
 
     /// Delete a job from the DLQ permanently.
     pub async fn delete_dlq_job(&self, dlq_id: i64) -> Result<bool, BackfillError> {
+        // Get the job first to record task identifier in metrics
+        let task_identifier = if let Some(job) = self.get_dlq_job(dlq_id).await? {
+            Some(job.task_identifier.clone())
+        } else {
+            None
+        };
+
         let query = format!("DELETE FROM {}.backfill_dlq WHERE id = $1", self.schema);
         let result = sqlx::query(&query).bind(dlq_id).execute(&self.pool).await?;
 
-        Ok(result.rows_affected() > 0)
+        let deleted = result.rows_affected() > 0;
+
+        if deleted && let Some(task) = task_identifier {
+            crate::metrics::record_dlq_job_deleted(&task);
+            tracing::info!(
+                dlq_id = dlq_id,
+                task = %task,
+                "Job deleted from DLQ"
+            );
+        }
+
+        Ok(deleted)
     }
 
     /// Get DLQ statistics for monitoring and dashboards.
@@ -382,7 +412,7 @@ impl BackfillClient {
             .map(|row| (row.get("task_identifier"), row.get::<i64, _>("count") as u32))
             .collect();
 
-        Ok(DlqStats {
+        let stats = DlqStats {
             total_jobs: row.get::<i64, _>("total_jobs") as u32,
             unique_tasks: row.get::<i64, _>("unique_tasks") as u32,
             unique_queues: row.get::<i64, _>("unique_queues") as u32,
@@ -390,8 +420,18 @@ impl BackfillClient {
             total_requeued: row.get::<i64, _>("total_requeued") as u32,
             oldest_failure: row.get("oldest_failure"),
             newest_failure: row.get("newest_failure"),
-            task_breakdown,
-        })
+            task_breakdown: task_breakdown.clone(),
+        };
+
+        // Update DLQ size gauge metrics
+        crate::metrics::update_dlq_size(stats.total_jobs);
+
+        // Update per-task breakdown
+        for (task, count) in &task_breakdown {
+            crate::metrics::update_dlq_size_by_task(task, *count);
+        }
+
+        Ok(stats)
     }
 
     /// Add a job to the DLQ. This is typically called internally when a job
@@ -402,6 +442,8 @@ impl BackfillClient {
         failure_reason: &str,
         last_error: Option<serde_json::Value>,
     ) -> Result<DlqJob, BackfillError> {
+        let start = std::time::Instant::now();
+
         // Note: Job doesn't have queue_name field, so we'll use "default" for now
         // In production, this would need to be tracked elsewhere or passed as a
         // parameter
@@ -435,7 +477,7 @@ impl BackfillClient {
             .fetch_one(&self.pool)
             .await?;
 
-        Ok(DlqJob {
+        let dlq_job = DlqJob {
             id: row.get("id"),
             original_job_id: row.get("original_job_id"),
             task_identifier: row.get("task_identifier"),
@@ -453,7 +495,21 @@ impl BackfillClient {
             requeued_count: row.get("requeued_count"),
             last_requeued_at: row.get("last_requeued_at"),
             notes: row.get("notes"),
-        })
+        };
+
+        // Record metrics
+        crate::metrics::record_db_operation("dlq_add", "success");
+        crate::metrics::record_db_operation_duration("dlq_add", start.elapsed().as_secs_f64());
+        crate::metrics::record_dlq_job_added(&dlq_job.queue_name, &dlq_job.task_identifier, &dlq_job.failure_reason);
+
+        tracing::info!(
+            dlq_id = dlq_job.id,
+            task = %dlq_job.task_identifier,
+            failure_reason = %dlq_job.failure_reason,
+            "Job moved to DLQ"
+        );
+
+        Ok(dlq_job)
     }
 
     /// Scan for permanently failed jobs and move them to the Dead Letter Queue.

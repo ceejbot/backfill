@@ -72,12 +72,42 @@ impl BackfillClient {
     where
         T: Serialize,
     {
+        let start = std::time::Instant::now();
         let utils = self.utils();
-        let job = utils
-            .add_raw_job(task_identifier, serde_json::to_value(payload)?, spec.into())
-            .await?;
 
-        Ok(job)
+        let result = utils
+            .add_raw_job(task_identifier, serde_json::to_value(payload)?, spec.clone().into())
+            .await;
+
+        match result {
+            Ok(job) => {
+                // Record successful enqueue
+                crate::metrics::record_db_operation("enqueue", "success");
+                crate::metrics::record_db_operation_duration("enqueue", start.elapsed().as_secs_f64());
+
+                // Record job enqueued metric
+                crate::metrics::record_job_enqueued(spec.queue.as_str(), task_identifier, spec.priority.0);
+
+                tracing::debug!(
+                    job_id = job.id(),
+                    task = task_identifier,
+                    queue = spec.queue.as_str(),
+                    priority = spec.priority.0,
+                    "Job enqueued"
+                );
+
+                Ok(job)
+            }
+            Err(e) => {
+                crate::metrics::record_db_operation("enqueue", "error");
+                tracing::error!(
+                    error = %e,
+                    task = task_identifier,
+                    "Failed to enqueue job"
+                );
+                Err(e.into())
+            }
+        }
     }
 
     /// Enqueue a job with a type-safe task handler.

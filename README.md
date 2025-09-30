@@ -20,7 +20,8 @@ Features:
 - **Exponential backoff**: Built-in retry policies with jitter to prevent thundering herds
 - **Dead letter queue**: Handling jobs that experience un-retryable failures or exceed their retry limits
 - **Error handling**: Automatic retry classification
-- **Monitoring**: Comprehensive logging and tracing
+- **Metrics**: Comprehensive metrics via the `metrics` crate - bring your own exporter (Prometheus, StatsD, etc.)
+- **Monitoring**: Structured logging and tracing throughout
 - **Building blocks for an axum admin api**: via a router you can mount on your own axum api server.
 
 Look at the `examples/` directory and the readme there for practical usage examples.
@@ -36,6 +37,7 @@ Look at the `examples/` directory and the readme there for practical usage examp
   - Monitoring, alerting, and troubleshooting
   - Common workflows for handling failures
 - **[Admin API Reference](docs/ADMIN_API.md)** - HTTP API for job management and monitoring
+- **[Metrics Guide](docs/METRICS.md)** - Comprehensive metrics for Prometheus, StatsD, and other backends
 - **[Database Setup](docs/DATABASE_SETUP.md)** - PostgreSQL configuration and schema management
 - **[DLQ Migrations](docs/DLQ_MIGRATIONS.md)** - Migration strategies for the DLQ schema
 - **[SQLx Setup](docs/SQLX_SETUP.md)** - Compile-time query verification setup

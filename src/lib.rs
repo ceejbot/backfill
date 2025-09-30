@@ -67,6 +67,7 @@ use serde::Serialize;
 
 mod client;
 mod errors;
+mod metrics;
 mod priorities;
 mod retries;
 mod worker;
