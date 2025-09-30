@@ -1,11 +1,12 @@
 //! Worker runner integration tests
 
+use std::time::Duration;
+
 use backfill::{
     BackfillError, IntoTaskHandlerResult, QueueConfig, TaskHandler, WorkerConfig, WorkerContext, WorkerError,
     WorkerRunner,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Simple test job for worker tests
@@ -24,8 +25,7 @@ impl TaskHandler for SimpleTestJob {
 
 /// Get test database URL
 fn get_test_database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://localhost/backfill_test".to_string())
+    std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://localhost/backfill_test".to_string())
 }
 
 #[tokio::test]
@@ -59,8 +59,7 @@ async fn test_worker_config_builder() {
 
 #[tokio::test]
 async fn test_worker_config_disable_dlq_processor() {
-    let config = WorkerConfig::new("postgresql://localhost/test")
-        .with_dlq_processor_interval(None);
+    let config = WorkerConfig::new("postgresql://localhost/test").with_dlq_processor_interval(None);
 
     assert_eq!(config.dlq_processor_interval, None);
 }
@@ -210,9 +209,7 @@ async fn test_worker_runner_client_access() -> Result<(), BackfillError> {
         message: "test".to_string(),
     };
 
-    let job = client
-        .enqueue("simple_test_job", &test_job, Default::default())
-        .await?;
+    let job = client.enqueue("simple_test_job", &test_job, Default::default()).await?;
 
     assert!(*job.id() > 0);
 
@@ -246,7 +243,7 @@ async fn test_worker_runner_spawn_and_cancel() -> Result<(), BackfillError> {
 
     assert!(result.is_ok(), "Worker should stop within timeout");
     assert!(
-        result.unwrap().is_ok(),
+        result.expect("timeout").is_ok(),
         "Worker should complete without errors"
     );
 
@@ -276,12 +273,11 @@ async fn test_worker_runner_run_until_cancelled() -> Result<(), BackfillError> {
     });
 
     // Run the worker
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), worker.run_until_cancelled(cancellation_token)).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), worker.run_until_cancelled(cancellation_token)).await;
 
     assert!(result.is_ok(), "Worker should stop within timeout");
     assert!(
-        result.unwrap().is_ok(),
+        result.expect("timeout").is_ok(),
         "Worker should complete without errors"
     );
 

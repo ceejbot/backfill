@@ -192,13 +192,10 @@ async fn test_dlq_add_job_and_retrieve() {
     assert_eq!(dlq_job.failure_count, *job.attempts() as i32);
 
     // Retrieve it
-    let retrieved = client
-        .get_dlq_job(dlq_job.id)
-        .await
-        .expect("should retrieve");
+    let retrieved = client.get_dlq_job(dlq_job.id).await.expect("should retrieve");
 
     assert!(retrieved.is_some());
-    let retrieved = retrieved.unwrap();
+    let retrieved = retrieved.expect("job should exist");
     assert_eq!(retrieved.id, dlq_job.id);
     assert_eq!(retrieved.task_identifier, "test_job");
 }
@@ -343,13 +340,10 @@ async fn test_dlq_requeue_job() {
     assert!(*requeued.id() > 0);
 
     // Check that the DLQ entry was updated
-    let updated_dlq = client
-        .get_dlq_job(dlq_job.id)
-        .await
-        .expect("should retrieve");
+    let updated_dlq = client.get_dlq_job(dlq_job.id).await.expect("should retrieve");
 
     assert!(updated_dlq.is_some());
-    let updated_dlq = updated_dlq.unwrap();
+    let updated_dlq = updated_dlq.expect("job should exist");
     assert_eq!(updated_dlq.requeued_count, 1);
     assert!(updated_dlq.last_requeued_at.is_some());
     assert_eq!(updated_dlq.notes, Some("Fixed and requeuing".to_string()));
@@ -381,10 +375,7 @@ async fn test_dlq_delete_job() {
     assert!(exists.is_some());
 
     // Delete it
-    let deleted = client
-        .delete_dlq_job(dlq_job.id)
-        .await
-        .expect("should delete");
+    let deleted = client.delete_dlq_job(dlq_job.id).await.expect("should delete");
     assert!(deleted);
 
     // Verify it's gone
@@ -489,7 +480,8 @@ async fn test_dlq_filter_by_time_range() {
     let jobs_after = client.list_dlq_jobs(filter).await.expect("should list");
     assert!(jobs_after.total >= 1);
 
-    // Filter for jobs before past time (should not include our job, unless timing is very tight)
+    // Filter for jobs before past time (should not include our job, unless timing
+    // is very tight)
     let filter = DlqFilter {
         failed_before: Some(past),
         ..Default::default()
@@ -540,10 +532,7 @@ async fn test_dlq_with_different_priorities() {
             .expect("should add to DLQ");
     }
 
-    let list = client
-        .list_dlq_jobs(DlqFilter::default())
-        .await
-        .expect("should list");
+    let list = client.list_dlq_jobs(DlqFilter::default()).await.expect("should list");
 
     assert_eq!(list.total, 3);
 
