@@ -4,7 +4,19 @@
 //! library using the `metrics` crate. Consumers can install any metrics
 //! recorder (Prometheus, StatsD, etc.) to collect these metrics.
 //!
-//! All metrics follow the naming convention: `backfill.<category>.<metric>`
+//! All metrics follow the naming convention: `backfill_<category>_<metric>`
+//! (Prometheus-compatible naming with underscores)
+//!
+//! ## Automatic vs Manual Metrics
+//!
+//! The library automatically emits metrics for:
+//! - Job enqueuing
+//! - DLQ operations (add, requeue, delete)
+//! - Database operations
+//!
+//! Job lifecycle metrics (start, completion, failure) require manual instrumentation
+//! in your task handlers due to GraphileWorker limitations. Use the public helper
+//! functions in this module to add metrics to your handlers.
 
 use chrono::{DateTime, Utc};
 
@@ -46,11 +58,11 @@ impl PriorityBand {
     }
 }
 
-/// Record a job being enqueued
+/// Record a job being enqueued (automatically called by the library)
 pub(crate) fn record_job_enqueued(queue: &str, task: &str, priority: i16) {
     let priority_band = PriorityBand::from_priority(priority);
     metrics::counter!(
-        "backfill.jobs.enqueued",
+        "backfill_jobs_enqueued",
         "queue" => queue.to_string(),
         "task" => task.to_string(),
         "priority_band" => priority_band.as_str().to_string(),
@@ -59,9 +71,21 @@ pub(crate) fn record_job_enqueued(queue: &str, task: &str, priority: i16) {
 }
 
 /// Record a job starting execution
-pub(crate) fn record_job_started(queue: &str, task: &str) {
+///
+/// Call this at the beginning of your TaskHandler::run() method to track when jobs start.
+///
+/// # Example
+/// ```rust,ignore
+/// use backfill::metrics;
+///
+/// async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+///     metrics::record_job_started("my_queue", "my_task");
+///     // ... job logic
+/// }
+/// ```
+pub fn record_job_started(queue: &str, task: &str) {
     metrics::counter!(
-        "backfill.jobs.started",
+        "backfill_jobs_started",
         "queue" => queue.to_string(),
         "task" => task.to_string(),
     )
@@ -69,9 +93,11 @@ pub(crate) fn record_job_started(queue: &str, task: &str) {
 }
 
 /// Record a job completing successfully
-pub(crate) fn record_job_completed(queue: &str, task: &str, attempt: i16) {
+///
+/// Call this when your job completes successfully to track completion metrics.
+pub fn record_job_completed(queue: &str, task: &str, attempt: i16) {
     metrics::counter!(
-        "backfill.jobs.completed",
+        "backfill_jobs_completed",
         "queue" => queue.to_string(),
         "task" => task.to_string(),
         "attempt" => attempt.to_string(),
@@ -80,9 +106,11 @@ pub(crate) fn record_job_completed(queue: &str, task: &str, attempt: i16) {
 }
 
 /// Record a job failure
-pub(crate) fn record_job_failed(queue: &str, task: &str, error_type: &str, attempt: i16) {
+///
+/// Call this when your job fails to track failure metrics and error types.
+pub fn record_job_failed(queue: &str, task: &str, error_type: &str, attempt: i16) {
     metrics::counter!(
-        "backfill.jobs.failed",
+        "backfill_jobs_failed",
         "queue" => queue.to_string(),
         "task" => task.to_string(),
         "error_type" => error_type.to_string(),
@@ -92,9 +120,11 @@ pub(crate) fn record_job_failed(queue: &str, task: &str, error_type: &str, attem
 }
 
 /// Record job execution duration
-pub(crate) fn record_job_duration(queue: &str, task: &str, status: &str, duration_secs: f64) {
+///
+/// Call this after job completion to track how long jobs take.
+pub fn record_job_duration(queue: &str, task: &str, status: &str, duration_secs: f64) {
     metrics::histogram!(
-        "backfill.jobs.duration_seconds",
+        "backfill_jobs_duration_seconds",
         "queue" => queue.to_string(),
         "task" => task.to_string(),
         "status" => status.to_string(),
@@ -114,7 +144,7 @@ pub(crate) fn record_job_wait_time(
     let priority_band = PriorityBand::from_priority(priority);
 
     metrics::histogram!(
-        "backfill.jobs.wait_time_seconds",
+        "backfill_jobs_wait_time_seconds",
         "queue" => queue.to_string(),
         "task" => task.to_string(),
         "priority_band" => priority_band.as_str().to_string(),
@@ -125,7 +155,7 @@ pub(crate) fn record_job_wait_time(
 /// Update queue depth gauge
 pub(crate) fn update_queue_depth(queue: &str, depth: i64) {
     metrics::gauge!(
-        "backfill.queue.depth",
+        "backfill_queue_depth",
         "queue" => queue.to_string(),
     )
     .set(depth as f64);
@@ -134,7 +164,7 @@ pub(crate) fn update_queue_depth(queue: &str, depth: i64) {
 /// Update active jobs gauge
 pub(crate) fn update_active_jobs(queue: &str, count: i64) {
     metrics::gauge!(
-        "backfill.queue.active_jobs",
+        "backfill_queue_active_jobs",
         "queue" => queue.to_string(),
     )
     .set(count as f64);
@@ -143,7 +173,7 @@ pub(crate) fn update_active_jobs(queue: &str, count: i64) {
 /// Record a job being added to DLQ
 pub(crate) fn record_dlq_job_added(queue: &str, task: &str, reason: &str) {
     metrics::counter!(
-        "backfill.dlq.jobs_added",
+        "backfill_dlq_jobs_added",
         "queue" => queue.to_string(),
         "task" => task.to_string(),
         "reason" => reason.to_string(),
@@ -153,13 +183,13 @@ pub(crate) fn record_dlq_job_added(queue: &str, task: &str, reason: &str) {
 
 /// Update DLQ size gauge
 pub(crate) fn update_dlq_size(size: u32) {
-    metrics::gauge!("backfill.dlq.size").set(size as f64);
+    metrics::gauge!("backfill_dlq_size").set(size as f64);
 }
 
 /// Update DLQ size with task breakdown
 pub(crate) fn update_dlq_size_by_task(task: &str, count: u32) {
     metrics::gauge!(
-        "backfill.dlq.size",
+        "backfill_dlq_size",
         "task" => task.to_string(),
     )
     .set(count as f64);
@@ -168,7 +198,7 @@ pub(crate) fn update_dlq_size_by_task(task: &str, count: u32) {
 /// Record a job being requeued from DLQ
 pub(crate) fn record_dlq_job_requeued(task: &str, target_queue: &str) {
     metrics::counter!(
-        "backfill.dlq.jobs_requeued",
+        "backfill_dlq_jobs_requeued",
         "task" => task.to_string(),
         "queue" => target_queue.to_string(),
     )
@@ -178,7 +208,7 @@ pub(crate) fn record_dlq_job_requeued(task: &str, target_queue: &str) {
 /// Record a job being deleted from DLQ
 pub(crate) fn record_dlq_job_deleted(task: &str) {
     metrics::counter!(
-        "backfill.dlq.jobs_deleted",
+        "backfill_dlq_jobs_deleted",
         "task" => task.to_string(),
     )
     .increment(1);
@@ -187,7 +217,7 @@ pub(crate) fn record_dlq_job_deleted(task: &str) {
 /// Record DLQ job age
 pub(crate) fn record_dlq_age(task: &str, age_seconds: f64) {
     metrics::histogram!(
-        "backfill.dlq.age_seconds",
+        "backfill_dlq_age_seconds",
         "task" => task.to_string(),
     )
     .record(age_seconds);
@@ -196,7 +226,7 @@ pub(crate) fn record_dlq_age(task: &str, age_seconds: f64) {
 /// Update worker active count
 pub(crate) fn update_worker_active(queue: &str, count: i32) {
     metrics::gauge!(
-        "backfill.worker.active",
+        "backfill_worker_active",
         "queue" => queue.to_string(),
     )
     .set(count as f64);
@@ -205,7 +235,7 @@ pub(crate) fn update_worker_active(queue: &str, count: i32) {
 /// Update worker utilization
 pub(crate) fn update_worker_utilization(queue: &str, utilization: f64) {
     metrics::gauge!(
-        "backfill.worker.utilization",
+        "backfill_worker_utilization",
         "queue" => queue.to_string(),
     )
     .set(utilization.clamp(0.0, 1.0));
@@ -214,7 +244,7 @@ pub(crate) fn update_worker_utilization(queue: &str, utilization: f64) {
 /// Record a worker poll operation
 pub(crate) fn record_worker_poll(queue: &str, result: &str) {
     metrics::counter!(
-        "backfill.worker.polls",
+        "backfill_worker_polls",
         "queue" => queue.to_string(),
         "result" => result.to_string(),
     )
@@ -224,7 +254,7 @@ pub(crate) fn record_worker_poll(queue: &str, result: &str) {
 /// Record a retry attempt
 pub(crate) fn record_retry_attempted(task: &str, queue: &str, attempt: i16) {
     metrics::counter!(
-        "backfill.retries.attempted",
+        "backfill_retries_attempted",
         "task" => task.to_string(),
         "queue" => queue.to_string(),
         "attempt" => attempt.to_string(),
@@ -235,7 +265,7 @@ pub(crate) fn record_retry_attempted(task: &str, queue: &str, attempt: i16) {
 /// Record retries exhausted
 pub(crate) fn record_retries_exhausted(task: &str, max_attempts: i16) {
     metrics::counter!(
-        "backfill.retries.exhausted",
+        "backfill_retries_exhausted",
         "task" => task.to_string(),
         "max_attempts" => max_attempts.to_string(),
     )
@@ -245,7 +275,7 @@ pub(crate) fn record_retries_exhausted(task: &str, max_attempts: i16) {
 /// Record a database operation
 pub(crate) fn record_db_operation(operation: &str, status: &str) {
     metrics::counter!(
-        "backfill.db.operations",
+        "backfill_db_operations",
         "operation" => operation.to_string(),
         "status" => status.to_string(),
     )
@@ -255,10 +285,130 @@ pub(crate) fn record_db_operation(operation: &str, status: &str) {
 /// Record database operation duration
 pub(crate) fn record_db_operation_duration(operation: &str, duration_secs: f64) {
     metrics::histogram!(
-        "backfill.db.operation_duration_seconds",
+        "backfill_db_operation_duration_seconds",
         "operation" => operation.to_string(),
     )
     .record(duration_secs);
+}
+
+/// Helper for instrumenting job execution with metrics
+///
+/// This helper automatically records job start, duration, and completion/failure metrics.
+/// Use it to wrap your job logic for automatic metric collection.
+///
+/// # Example
+/// ```rust,ignore
+/// use backfill::{TaskHandler, WorkerContext, IntoTaskHandlerResult, metrics::JobMetrics};
+///
+/// struct MyJob { data: String }
+///
+/// impl TaskHandler for MyJob {
+///     const IDENTIFIER: &'static str = "my_job";
+///
+///     async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+///         JobMetrics::new("my_queue", Self::IDENTIFIER, &ctx)
+///             .instrument(|| async {
+///                 // Your job logic here
+///                 println!("Processing: {}", self.data);
+///                 Ok::<(), Box<dyn std::error::Error>>(())
+///             })
+///             .await
+///     }
+/// }
+/// ```
+pub struct JobMetrics {
+    queue: String,
+    task: String,
+    attempt: i16,
+    start: std::time::Instant,
+}
+
+impl JobMetrics {
+    /// Create a new job metrics helper
+    ///
+    /// # Arguments
+    /// - `queue`: Queue name (e.g., "fast", "bulk")
+    /// - `task`: Task identifier
+    /// - `ctx`: WorkerContext from your task handler
+    pub fn new(queue: impl Into<String>, task: impl Into<String>, ctx: &crate::WorkerContext) -> Self {
+        let queue = queue.into();
+        let task = task.into();
+        let attempt = *ctx.job().attempts();
+
+        // Record job start
+        record_job_started(&queue, &task);
+
+        Self {
+            queue,
+            task,
+            attempt,
+            start: std::time::Instant::now(),
+        }
+    }
+
+    /// Instrument a job function with automatic metrics
+    ///
+    /// This will record:
+    /// - Job started (already recorded in `new()`)
+    /// - Job completion or failure
+    /// - Job duration
+    /// - Retry metrics if applicable
+    pub async fn instrument<F, Fut, T, E>(self, f: F) -> Result<T, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::error::Error,
+    {
+        let result = f().await;
+        let duration = self.start.elapsed().as_secs_f64();
+
+        match &result {
+            Ok(_) => {
+                record_job_completed(&self.queue, &self.task, self.attempt);
+                record_job_duration(&self.queue, &self.task, "success", duration);
+            }
+            Err(e) => {
+                let error_type = classify_error_for_metrics(e);
+                record_job_failed(&self.queue, &self.task, error_type, self.attempt);
+                record_job_duration(&self.queue, &self.task, "failed", duration);
+
+                if self.attempt > 1 {
+                    record_retry_attempted(&self.task, &self.queue, self.attempt);
+                }
+            }
+        }
+
+        result
+    }
+}
+
+/// Classify an error for metrics labels
+///
+/// Attempts to categorize errors into standard types for metrics.
+/// Returns a string label suitable for the `error_type` metric label.
+pub fn classify_error_for_metrics<E: std::error::Error + ?Sized>(error: &E) -> &'static str {
+    let msg = error.to_string().to_lowercase();
+
+    // Try to classify based on error message content
+    if msg.contains("timeout") || msg.contains("timed out") {
+        "timeout"
+    } else if msg.contains("network") || msg.contains("connection") {
+        "network"
+    } else if msg.contains("not found") || msg.contains("404") {
+        "not_found"
+    } else if msg.contains("unauthorized") || msg.contains("401") {
+        "unauthorized"
+    } else if msg.contains("forbidden") || msg.contains("403") {
+        "forbidden"
+    } else if msg.contains("validation") || msg.contains("invalid") {
+        "validation"
+    } else if msg.contains("rate limit") || msg.contains("429") {
+        "rate_limit"
+    } else if msg.contains("unavailable") || msg.contains("503") {
+        "unavailable"
+    } else {
+        "unknown"
+    }
 }
 
 #[cfg(test)]

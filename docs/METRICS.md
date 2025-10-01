@@ -1,39 +1,180 @@
 # Metrics
 
-The backfill library emits comprehensive metrics using the [`metrics`](https://docs.rs/metrics) crate. This allows you to collect and export metrics to any backend (Prometheus, StatsD, etc.) by configuring a metrics recorder in your application.
+The backfill library provides comprehensive metrics using the [`metrics`](https://docs.rs/metrics) crate. Metrics are emitted using Prometheus-compatible naming (underscores, not dots) and can be exported to any backend (Prometheus, StatsD, etc.) by installing a metrics recorder.
 
 ## Metrics Philosophy
 
-As a library, backfill uses the `metrics` crate's facade pattern:
-- **We emit metrics** using `metrics` macros throughout the library
-- **You choose the backend** by installing a recorder (e.g., `metrics-exporter-prometheus`)
-- **You control the export** mechanism (HTTP endpoint, push gateway, etc.)
+**Automatic where possible, easy when manual:**
+- ✅ **Automatic metrics** for operations the library controls (enqueueing, DLQ, database)
+- 🛠️ **Easy manual instrumentation** for job lifecycle (helper utilities provided)
+- 🎯 **Bring your own backend** - install any metrics recorder (Prometheus, StatsD, etc.)
+- 📊 **Zero overhead** when no recorder is installed
 
 This design keeps the library backend-agnostic while providing comprehensive observability.
 
+## Automatic vs Manual Metrics
+
+### ✅ Automatically Emitted
+
+The library automatically emits these metrics without any user code:
+
+- **`backfill_jobs_enqueued`** - Recorded when you call `client.enqueue()`
+- **`backfill_dlq_*`** - All DLQ operations (jobs added, requeued, deleted, size gauges)
+- **`backfill_db_operations`** - Database operation counts and durations
+
+**You get these for free** - just install a metrics recorder!
+
+### 🛠️ Manual Instrumentation Required
+
+Due to GraphileWorker's architecture, these metrics require manual instrumentation in your task handlers:
+
+- **`backfill_jobs_started/completed/failed`** - Job lifecycle events
+- **`backfill_jobs_duration_seconds`** - Job execution time
+- **`backfill_jobs_wait_time_seconds`** - Queue latency
+- **`backfill_retries_attempted/exhausted`** - Retry metrics
+
+**Don't worry** - we provide easy-to-use helpers! See [Manual Instrumentation](#manual-instrumentation) below.
+
 ## Quick Start
+
+### 1. Install a Metrics Recorder
 
 ```rust
 use metrics_exporter_prometheus::PrometheusBuilder;
-use backfill::WorkerRunner;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install Prometheus recorder
-    PrometheusBuilder::new()
-        .install()
-        .expect("failed to install Prometheus recorder");
-    
-    // Your backfill usage - metrics are automatically emitted
-    let worker = WorkerRunner::builder(config).await?
-        .define_job::<MyJob>()
-        .build()
-        .await?;
-    
-    // Metrics are now available at the recorder's endpoint
+    let handle = PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install recorder");
+
+    // Your backfill usage - automatic metrics are emitted!
+    let client = BackfillClient::new(&database_url).await?;
+    client.enqueue("my_task", &payload, spec).await?;  // ← backfill_jobs_enqueued emitted!
+
+    // Export metrics via HTTP
+    // handle.render() gives you the Prometheus text format
     Ok(())
 }
 ```
+
+### 2. Add Manual Instrumentation to Jobs (Optional but Recommended)
+
+```rust
+use backfill::{TaskHandler, WorkerContext, IntoTaskHandlerResult};
+
+struct MyJob {
+    data: String,
+}
+
+impl TaskHandler for MyJob {
+    const IDENTIFIER: &'static str = "my_job";
+
+    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        // Option A: Use the JobMetrics helper (easiest!)
+        backfill::metrics::JobMetrics::new("fast", Self::IDENTIFIER, &ctx)
+            .instrument(|| async {
+                // Your job logic here
+                process_data(&self.data).await
+            })
+            .await
+    }
+}
+
+async fn process_data(data: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Do work...
+    Ok(())
+}
+```
+
+That's it! You now have comprehensive observability.
+
+## Manual Instrumentation
+
+For job lifecycle metrics, you need to add instrumentation to your task handlers. We provide two approaches:
+
+### Approach 1: JobMetrics Helper (Recommended)
+
+The `JobMetrics` helper automatically handles all metrics for you:
+
+```rust
+use backfill::{TaskHandler, WorkerContext, IntoTaskHandlerResult, metrics::JobMetrics};
+
+impl TaskHandler for MyJob {
+    const IDENTIFIER: &'static str = "my_job";
+
+    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        JobMetrics::new("fast", Self::IDENTIFIER, &ctx)
+            .instrument(|| async {
+                // Your job logic
+                do_work().await
+            })
+            .await
+    }
+}
+```
+
+**What it does:**
+- ✅ Records job start (`backfill_jobs_started`)
+- ✅ Records completion/failure (`backfill_jobs_completed` / `backfill_jobs_failed`)
+- ✅ Records duration (`backfill_jobs_duration_seconds`)
+- ✅ Records retry attempts (`backfill_retries_attempted`) if applicable
+- ✅ Classifies error types automatically
+
+### Approach 2: Manual Calls
+
+For more control, call the metric functions directly:
+
+```rust
+use backfill::{TaskHandler, WorkerContext, IntoTaskHandlerResult, metrics};
+
+impl TaskHandler for MyJob {
+    const IDENTIFIER: &'static str = "my_job";
+
+    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        let start = std::time::Instant::now();
+        let attempt = *ctx.job().attempts();
+
+        // Record start
+        metrics::record_job_started("fast", Self::IDENTIFIER);
+
+        // Do work
+        let result = do_work().await;
+
+        // Record completion
+        let duration = start.elapsed().as_secs_f64();
+        match &result {
+            Ok(_) => {
+                metrics::record_job_completed("fast", Self::IDENTIFIER, attempt);
+                metrics::record_job_duration("fast", Self::IDENTIFIER, "success", duration);
+            }
+            Err(e) => {
+                let error_type = metrics::classify_error_for_metrics(e.as_ref());
+                metrics::record_job_failed("fast", Self::IDENTIFIER, error_type, attempt);
+                metrics::record_job_duration("fast", Self::IDENTIFIER, "failed", duration);
+            }
+        }
+
+        result
+    }
+}
+```
+
+### Error Classification
+
+The `classify_error_for_metrics()` function automatically categorizes errors into standard types:
+
+- `timeout` - Timeout errors
+- `network` - Network/connection errors
+- `not_found` - 404-style errors
+- `unauthorized` / `forbidden` - Auth errors
+- `validation` - Validation failures
+- `rate_limit` - Rate limit errors
+- `unavailable` - Service unavailable
+- `unknown` - Everything else
+
+You can also pass your own error type string for more specific classification.
 
 ## Metric Categories
 
@@ -41,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Track the complete lifecycle of jobs through the system.
 
-#### `backfill.jobs.enqueued`
+#### `backfill_jobs_enqueued`
 - **Type**: Counter
 - **Description**: Total number of jobs enqueued
 - **Labels**:
@@ -50,7 +191,7 @@ Track the complete lifecycle of jobs through the system.
   - `priority_band`: Priority band (emergency, fast_high, fast_default, bulk_default, bulk_low, bulk_lowest)
 - **Use**: Monitor job ingestion rate, identify high-volume tasks
 
-#### `backfill.jobs.started`
+#### `backfill_jobs_started`
 - **Type**: Counter
 - **Description**: Total number of jobs that began execution
 - **Labels**:
@@ -58,7 +199,7 @@ Track the complete lifecycle of jobs through the system.
   - `task`: Task identifier
 - **Use**: Track job processing throughput, compare with enqueued to see queue depth trends
 
-#### `backfill.jobs.completed`
+#### `backfill_jobs_completed`
 - **Type**: Counter
 - **Description**: Total number of jobs that completed successfully
 - **Labels**:
@@ -67,7 +208,7 @@ Track the complete lifecycle of jobs through the system.
   - `attempt`: Which attempt succeeded (1-N)
 - **Use**: Monitor success rate, identify tasks that often succeed on retry
 
-#### `backfill.jobs.failed`
+#### `backfill_jobs_failed`
 - **Type**: Counter
 - **Description**: Total number of job execution failures
 - **Labels**:
@@ -77,7 +218,7 @@ Track the complete lifecycle of jobs through the system.
   - `attempt`: Which attempt failed (1-N)
 - **Use**: Identify problematic tasks, error patterns, retry effectiveness
 
-#### `backfill.jobs.duration_seconds`
+#### `backfill_jobs_duration_seconds`
 - **Type**: Histogram
 - **Description**: Job execution duration in seconds
 - **Labels**:
@@ -87,7 +228,7 @@ Track the complete lifecycle of jobs through the system.
 - **Buckets**: [0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0]
 - **Use**: Identify slow tasks, detect performance regressions, capacity planning
 
-#### `backfill.jobs.wait_time_seconds`
+#### `backfill_jobs_wait_time_seconds`
 - **Type**: Histogram
 - **Description**: Time from enqueue to execution start (queue latency)
 - **Labels**:
@@ -101,7 +242,7 @@ Track the complete lifecycle of jobs through the system.
 
 Real-time visibility into queue state.
 
-#### `backfill.queue.depth`
+#### `backfill_queue_depth`
 - **Type**: Gauge
 - **Description**: Current number of pending jobs in queue
 - **Labels**:
@@ -109,7 +250,7 @@ Real-time visibility into queue state.
   - `priority_band`: Priority band (optional, for detailed monitoring)
 - **Use**: Monitor queue backlog, autoscaling triggers, capacity planning
 
-#### `backfill.queue.active_jobs`
+#### `backfill_queue_active_jobs`
 - **Type**: Gauge
 - **Description**: Current number of jobs actively being processed
 - **Labels**:
@@ -120,7 +261,7 @@ Real-time visibility into queue state.
 
 Track failed jobs that require manual intervention.
 
-#### `backfill.dlq.jobs_added`
+#### `backfill_dlq_jobs_added`
 - **Type**: Counter
 - **Description**: Total number of jobs moved to DLQ
 - **Labels**:
@@ -129,14 +270,14 @@ Track failed jobs that require manual intervention.
   - `reason`: Failure reason category (max_attempts_exceeded, non_retryable, etc.)
 - **Use**: Alert on DLQ growth, identify problematic tasks
 
-#### `backfill.dlq.size`
+#### `backfill_dlq_size`
 - **Type**: Gauge
 - **Description**: Current number of jobs in DLQ
 - **Labels**:
   - `task`: Task identifier (optional, for detailed breakdown)
 - **Use**: Monitor DLQ health, alert on accumulation
 
-#### `backfill.dlq.jobs_requeued`
+#### `backfill_dlq_jobs_requeued`
 - **Type**: Counter
 - **Description**: Total number of jobs requeued from DLQ
 - **Labels**:
@@ -144,14 +285,14 @@ Track failed jobs that require manual intervention.
   - `queue`: Target queue for requeue
 - **Use**: Track remediation efforts, validate fixes
 
-#### `backfill.dlq.jobs_deleted`
+#### `backfill_dlq_jobs_deleted`
 - **Type**: Counter
 - **Description**: Total number of jobs permanently deleted from DLQ
 - **Labels**:
   - `task`: Task identifier
 - **Use**: Track DLQ cleanup operations
 
-#### `backfill.dlq.age_seconds`
+#### `backfill_dlq_age_seconds`
 - **Type**: Histogram
 - **Description**: Age of jobs in DLQ (time since moved to DLQ)
 - **Labels**:
@@ -163,21 +304,21 @@ Track failed jobs that require manual intervention.
 
 Monitor worker pool health and utilization.
 
-#### `backfill.worker.active`
+#### `backfill_worker_active`
 - **Type**: Gauge
 - **Description**: Number of worker instances currently running
 - **Labels**:
   - `queue`: Queue name
 - **Use**: Monitor worker fleet health, autoscaling validation
 
-#### `backfill.worker.utilization`
+#### `backfill_worker_utilization`
 - **Type**: Gauge (0.0 to 1.0)
 - **Description**: Worker utilization (active_jobs / concurrency_limit)
 - **Labels**:
   - `queue`: Queue name
 - **Use**: Identify under/over-provisioning, capacity planning
 
-#### `backfill.worker.polls`
+#### `backfill_worker_polls`
 - **Type**: Counter
 - **Description**: Total number of polling operations
 - **Labels**:
@@ -189,7 +330,7 @@ Monitor worker pool health and utilization.
 
 Understand retry patterns and effectiveness.
 
-#### `backfill.retries.attempted`
+#### `backfill_retries_attempted`
 - **Type**: Counter
 - **Description**: Total number of retry attempts
 - **Labels**:
@@ -198,7 +339,7 @@ Understand retry patterns and effectiveness.
   - `queue`: Queue name
 - **Use**: Identify retry-heavy tasks, validate retry policies
 
-#### `backfill.retries.exhausted`
+#### `backfill_retries_exhausted`
 - **Type**: Counter
 - **Description**: Jobs that exhausted all retry attempts
 - **Labels**:
@@ -210,7 +351,7 @@ Understand retry patterns and effectiveness.
 
 Track database interaction health.
 
-#### `backfill.db.operations`
+#### `backfill_db_operations`
 - **Type**: Counter
 - **Description**: Database operations performed
 - **Labels**:
@@ -218,7 +359,7 @@ Track database interaction health.
   - `status`: Result (success, error)
 - **Use**: Monitor database health, identify bottlenecks
 
-#### `backfill.db.operation_duration_seconds`
+#### `backfill_db_operation_duration_seconds`
 - **Type**: Histogram
 - **Description**: Database operation duration
 - **Labels**:
@@ -284,7 +425,7 @@ async fn metrics_handler(handle: PrometheusHandle) -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = PrometheusBuilder::new()
         .set_buckets_for_metric(
-            Matcher::Prefix("backfill.jobs.duration".to_string()),
+            Matcher::Prefix("backfill_jobs_duration".to_string()),
             &[0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0],
         )?
         .install_recorder()?;
@@ -453,7 +594,7 @@ For very high-volume systems (>1000 jobs/sec), consider:
 ```rust
 // Sample metrics for high-volume tasks
 if should_sample() {
-    metrics::histogram!("backfill.jobs.duration_seconds", duration);
+    metrics::histogram!("backfill_jobs_duration_seconds", duration);
 }
 
 fn should_sample() -> bool {
@@ -481,26 +622,26 @@ avg by (task)(rate(backfill_jobs_duration_seconds_sum[5m]) /
 Metrics are emitted at key points:
 
 1. **Enqueue**: When `client.enqueue()` is called
-   - `backfill.jobs.enqueued` incremented
-   - `backfill.queue.depth` updated
+   - `backfill_jobs_enqueued` incremented
+   - `backfill_queue_depth` updated
 
 2. **Job Start**: When worker claims and begins job
-   - `backfill.jobs.started` incremented
-   - `backfill.jobs.wait_time_seconds` recorded
-   - `backfill.queue.depth` decremented
-   - `backfill.queue.active_jobs` incremented
+   - `backfill_jobs_started` incremented
+   - `backfill_jobs_wait_time_seconds` recorded
+   - `backfill_queue_depth` decremented
+   - `backfill_queue_active_jobs` incremented
 
 3. **Job Complete**: When job finishes (success or failure)
-   - `backfill.jobs.completed` or `backfill.jobs.failed` incremented
-   - `backfill.jobs.duration_seconds` recorded
-   - `backfill.queue.active_jobs` decremented
+   - `backfill_jobs_completed` or `backfill_jobs_failed` incremented
+   - `backfill_jobs_duration_seconds` recorded
+   - `backfill_queue_active_jobs` decremented
 
 4. **DLQ Movement**: When job moves to DLQ
-   - `backfill.dlq.jobs_added` incremented
-   - `backfill.dlq.size` incremented
+   - `backfill_dlq_jobs_added` incremented
+   - `backfill_dlq_size` incremented
 
 5. **Retry**: When job is retried
-   - `backfill.retries.attempted` incremented
+   - `backfill_retries_attempted` incremented
 
 ## Disabling Metrics
 

@@ -67,13 +67,14 @@ use serde::Serialize;
 
 mod client;
 mod errors;
-mod metrics;
 mod priorities;
 mod retries;
 mod worker;
 
 #[cfg(feature = "axum")]
 pub mod admin;
+
+pub mod metrics;
 
 pub use client::*;
 pub use errors::{BackfillError, WorkerError};
