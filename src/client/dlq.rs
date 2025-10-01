@@ -321,11 +321,11 @@ impl BackfillClient {
         // Record metrics
         crate::metrics::record_dlq_job_requeued(&dlq_job.task_identifier, spec.queue.as_str());
 
-        tracing::info!(
-            dlq_id = dlq_id,
-            job_id = job.id(),
-            task = %dlq_job.task_identifier,
-            "Job requeued from DLQ"
+        log::info!(
+            "Job requeued from DLQ (dlq_id: {}, job_id: {}, task: {})",
+            dlq_id,
+            job.id(),
+            dlq_job.task_identifier
         );
 
         // Update the DLQ record
@@ -365,11 +365,7 @@ impl BackfillClient {
 
         if deleted && let Some(task) = task_identifier {
             crate::metrics::record_dlq_job_deleted(&task);
-            tracing::info!(
-                dlq_id = dlq_id,
-                task = %task,
-                "Job deleted from DLQ"
-            );
+            log::info!("Job deleted from DLQ (dlq_id: {}, task: {})", dlq_id, task);
         }
 
         Ok(deleted)
@@ -502,11 +498,11 @@ impl BackfillClient {
         crate::metrics::record_db_operation_duration("dlq_add", start.elapsed().as_secs_f64());
         crate::metrics::record_dlq_job_added(&dlq_job.queue_name, &dlq_job.task_identifier, &dlq_job.failure_reason);
 
-        tracing::info!(
-            dlq_id = dlq_job.id,
-            task = %dlq_job.task_identifier,
-            failure_reason = %dlq_job.failure_reason,
-            "Job moved to DLQ"
+        log::info!(
+            "Job moved to DLQ (dlq_id: {}, task: {}, failure_reason: {})",
+            dlq_job.id,
+            dlq_job.task_identifier,
+            dlq_job.failure_reason
         );
 
         Ok(dlq_job)
@@ -592,20 +588,20 @@ impl BackfillClient {
                     match sqlx::query(&delete_query).bind(job_id).execute(&self.pool).await {
                         Ok(_) => {
                             moved_count += 1;
-                            tracing::info!(
-                                job_id = job_id,
-                                task_identifier = %task_identifier,
-                                attempts = attempts,
-                                max_attempts = max_attempts,
-                                "Successfully moved failed job to DLQ"
+                            log::info!(
+                                "Successfully moved failed job to DLQ (job_id: {}, task: {}, attempts: {}/{})",
+                                job_id,
+                                task_identifier,
+                                attempts,
+                                max_attempts
                             );
                         }
                         Err(e) => {
-                            tracing::error!(
-                                job_id = job_id,
-                                task_identifier = %task_identifier,
-                                error = %e,
-                                "Failed to delete job from main table after DLQ insertion"
+                            log::error!(
+                                "Failed to delete job from main table after DLQ insertion (job_id: {}, task: {}, error: {})",
+                                job_id,
+                                task_identifier,
+                                e
                             );
                             // Consider this a partial failure - job is in DLQ
                             // but also still in main table
@@ -613,18 +609,18 @@ impl BackfillClient {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
-                        job_id = job_id,
-                        task_identifier = %task_identifier,
-                        error = %e,
-                        "Failed to insert job into DLQ"
+                    log::error!(
+                        "Failed to insert job into DLQ (job_id: {}, task: {}, error: {})",
+                        job_id,
+                        task_identifier,
+                        e
                     );
                 }
             }
         }
 
         if moved_count > 0 {
-            tracing::info!(moved_count = moved_count, "DLQ processing completed");
+            log::info!("DLQ processing completed (moved_count: {})", moved_count);
         }
 
         Ok(moved_count)
@@ -654,27 +650,27 @@ impl BackfillClient {
             let mut interval_timer = tokio::time::interval(interval);
             interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            tracing::info!(
-                interval_seconds = interval.as_secs(),
-                "Starting DLQ processor background task"
+            log::info!(
+                "Starting DLQ processor background task (interval_seconds: {})",
+                interval.as_secs()
             );
 
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
-                        tracing::info!("DLQ processor shutting down");
+                        log::info!("DLQ processor shutting down");
                         break;
                     }
                     _ = interval_timer.tick() => {
                         match client.process_failed_jobs().await {
                             Ok(count) if count > 0 => {
-                                tracing::info!(moved_jobs = count, "DLQ processor moved failed jobs");
+                                log::info!("DLQ processor moved failed jobs (moved_jobs: {})", count);
                             }
                             Ok(_) => {
                                 // No jobs moved, no need to log
                             }
                             Err(e) => {
-                                tracing::error!(error = %e, "DLQ processor encountered error");
+                                log::error!("DLQ processor encountered error: {}", e);
                             }
                         }
                     }

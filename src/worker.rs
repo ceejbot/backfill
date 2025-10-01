@@ -275,7 +275,7 @@ impl From<WorkerOptionsBuilder> for WorkerOptions {
         // Note: GraphileWorker doesn't expose queue_name configuration in WorkerOptions
         // Multiple queues are handled at the job enqueueing level
         if builder.queue_name.is_some() {
-            tracing::warn!("Queue name configuration is not supported by GraphileWorker's WorkerOptions - ignoring");
+            log::warn!("Queue name configuration is not supported by GraphileWorker's WorkerOptions - ignoring");
         }
 
         // Register all job handlers
@@ -382,21 +382,21 @@ impl WorkerRunner {
     /// - An unrecoverable error occurs
     /// - The worker completes (unusual)
     pub async fn run_until_cancelled(&self, cancellation_token: CancellationToken) -> Result<(), BackfillError> {
-        tracing::info!(
-            dlq_enabled = self.config.dlq_processor_interval.is_some(),
-            "Starting worker runner"
+        log::info!(
+            "Starting worker runner (dlq_enabled: {})",
+            self.config.dlq_processor_interval.is_some()
         );
 
         // Start DLQ processor if configured
         let dlq_handle = if let Some(interval) = self.config.dlq_processor_interval {
-            tracing::info!(interval_secs = interval.as_secs(), "Starting DLQ processor");
+            log::info!("Starting DLQ processor (interval_secs: {})", interval.as_secs());
             Some(self.client.start_dlq_processor(interval, cancellation_token.clone()))
         } else {
             None
         };
 
         // Create and start the worker
-        tracing::info!("Starting worker instance");
+        log::info!("Starting worker instance");
         let worker = self.create_worker().await?;
 
         let handle = tokio::spawn({
@@ -411,16 +411,16 @@ impl WorkerRunner {
         // Wait for cancellation or worker completion
         tokio::select! {
             _ = cancellation_token.cancelled() => {
-                tracing::info!("Cancellation requested, stopping worker");
+                log::info!("Cancellation requested, stopping worker");
             }
             result = handle => {
                 match result {
                     Ok(worker_result) => {
-                        tracing::warn!("Worker completed unexpectedly");
+                        log::warn!("Worker completed unexpectedly");
                         worker_result?;
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "Worker task failed");
+                        log::error!("Worker task failed: {}", e);
                         return Err(BackfillError::WorkerRuntime(e.to_string()));
                     }
                 }
@@ -429,15 +429,15 @@ impl WorkerRunner {
 
         // Wait for DLQ processor to stop
         if let Some(dlq_handle) = dlq_handle {
-            tracing::info!("Waiting for DLQ processor to stop");
+            log::info!("Waiting for DLQ processor to stop");
             match tokio::time::timeout(Duration::from_secs(5), dlq_handle).await {
-                Ok(Ok(())) => tracing::info!("DLQ processor stopped gracefully"),
-                Ok(Err(e)) => tracing::warn!(error = %e, "DLQ processor stopped with error"),
-                Err(_) => tracing::warn!("DLQ processor shutdown timeout"),
+                Ok(Ok(())) => log::info!("DLQ processor stopped gracefully"),
+                Ok(Err(e)) => log::warn!("DLQ processor stopped with error: {}", e),
+                Err(_) => log::warn!("DLQ processor shutdown timeout"),
             }
         }
 
-        tracing::info!("Worker runner stopped");
+        log::info!("Worker runner stopped");
         Ok(())
     }
 
@@ -465,14 +465,14 @@ impl WorkerRunner {
     ///
     /// Returns the number of jobs processed across all workers.
     pub async fn process_available_jobs(&self) -> Result<usize, BackfillError> {
-        tracing::info!("Processing available jobs (one-shot mode)");
+        log::info!("Processing available jobs (one-shot mode)");
 
         // For now, this is a simplified implementation
         // In a full implementation, we'd query the job count and process them
         // without starting the persistent polling loop
 
-        tracing::warn!("process_available_jobs is not yet fully implemented");
-        tracing::info!("Consider using run_until_cancelled with a short timeout instead");
+        log::warn!("process_available_jobs is not yet fully implemented");
+        log::info!("Consider using run_until_cancelled with a short timeout instead");
 
         Ok(0)
     }

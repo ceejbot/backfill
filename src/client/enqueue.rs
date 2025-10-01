@@ -88,23 +88,19 @@ impl BackfillClient {
                 // Record job enqueued metric
                 crate::metrics::record_job_enqueued(spec.queue.as_str(), task_identifier, spec.priority.0);
 
-                tracing::debug!(
-                    job_id = job.id(),
-                    task = task_identifier,
-                    queue = spec.queue.as_str(),
-                    priority = spec.priority.0,
-                    "Job enqueued"
+                log::debug!(
+                    "Job enqueued (job_id: {}, task: {}, queue: {}, priority: {})",
+                    job.id(),
+                    task_identifier,
+                    spec.queue.as_str(),
+                    spec.priority.0
                 );
 
                 Ok(job)
             }
             Err(e) => {
                 crate::metrics::record_db_operation("enqueue", "error");
-                tracing::error!(
-                    error = %e,
-                    task = task_identifier,
-                    "Failed to enqueue job"
-                );
+                log::error!("Failed to enqueue job (task: {}, error: {})", task_identifier, e);
                 Err(e.into())
             }
         }
