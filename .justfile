@@ -18,6 +18,7 @@ fmt:
 # Run the same checks we run in CI. Requires nightly.
 ci: test fmt
 	cargo clippy --all-targets  -F axum
+	cargo test --doc
 
 # Auto-fix clippy complaints.
 lint:

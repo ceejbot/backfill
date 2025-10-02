@@ -15,9 +15,7 @@ default = []
 axum = ["dep:axum"]
 
 [dependencies]
-atty = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
-futures = "0.3"
 graphile_worker = "0.8"
 log = "0.4.28"
 metrics = "0.24"
@@ -30,17 +28,14 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.0", features = ["v4", "v7", "serde"] }
-veil = "0.2.0"
 
 # Optional dependencies for admin API
 axum = { version = "0.8", optional = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
 env_logger = "0.11"
 axum = "0.8"
 fastrand = "2.0"
-metrics-exporter-prometheus = "0.17"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 [lints.rust]
