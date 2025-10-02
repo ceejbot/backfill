@@ -218,12 +218,151 @@ let client = BackfillClient::new_with_schema(&url, \"app1_jobs\").await?;
 let client = BackfillClient::new_with_schema(&url, \"app2_jobs\").await?;
 ```
 
+## SQLx Compile-Time Query Verification
+
+This library uses SQLx for all database operations, which provides excellent compile-time verification of SQL queries. This is one of Rust's greatest strengths for database applications.
+
+### Overview
+
+SQLx macros like `sqlx::query!()` and `sqlx::query_as!()` verify your SQL queries at compile time by:
+- Connecting to your database during compilation
+- Parsing and validating SQL syntax
+- Checking table/column existence
+- Verifying parameter types and counts
+- Generating type-safe Rust code
+
+### Setup Options
+
+#### Option 1: Online Mode (Recommended for Development)
+
+Set the `DATABASE_URL` environment variable to enable compile-time verification:
+
+```bash
+# Local development
+export DATABASE_URL="postgresql://localhost:5432/backfill"
+
+# Or in .env file
+DATABASE_URL=postgresql://localhost:5432/backfill
+```
+
+**Pros:**
+- Always up-to-date with current schema
+- Works great in CI with test databases
+- No additional files to maintain
+
+**Cons:**
+- Requires database connection during compilation
+- Slower compilation times
+
+#### Option 2: Offline Mode (Recommended for Distribution)
+
+Generate query metadata offline using:
+
+```bash
+# First, ensure DATABASE_URL is set
+export DATABASE_URL="postgresql://localhost:5432/backfill"
+
+# Generate the metadata
+cargo sqlx prepare
+
+# This creates .sqlx/sqlx-data.json
+```
+
+**Pros:**
+- No database required for compilation
+- Faster compilation
+- Can be committed to version control
+- Good for distributing crates
+
+**Cons:**
+- Must remember to regenerate after schema changes
+- Metadata can become stale
+
+#### Option 3: Hybrid Approach (Best of Both Worlds)
+
+Use online mode in development/CI and offline mode for releases:
+
+```bash
+# Development: Use online mode
+export DATABASE_URL="postgresql://localhost:5432/backfill"
+cargo build
+
+# Before release: Generate offline metadata
+cargo sqlx prepare
+git add .sqlx/sqlx-data.json
+git commit -m "Update SQLx query metadata"
+
+# CI: Check metadata is current
+cargo sqlx prepare --check
+```
+
+### CI/CD Integration
+
+Example GitHub Actions workflow:
+
+```yaml
+name: Test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backfill
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+
+    - name: Check SQLx queries
+      run: cargo sqlx prepare --check
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backfill
+
+    - name: Run tests
+      run: cargo test
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/backfill
+```
+
+### Best Practices
+
+1. **Always regenerate metadata** after schema changes with `cargo sqlx prepare`
+2. **Commit .sqlx/sqlx-data.json** for reproducible builds
+3. **Test both online and offline modes** in CI
+4. **Keep DATABASE_URL in .env** for local development
+
+### Performance Impact
+
+- **Compile time**: +10-30% with online mode, minimal with offline
+- **Runtime**: Zero overhead - queries are pre-compiled
+- **Binary size**: Slightly larger due to generated code
+- **Safety**: Eliminates entire classes of runtime errors
+
+The safety benefits far outweigh the small compilation cost!
+
 ## Summary
 
 - ✅ **No manual migrations needed** - GraphileWorker handles everything
-- ✅ **Automatic schema creation** - Just provide a connection string  
+- ✅ **Automatic schema creation** - Just provide a connection string
 - ✅ **Production ready** - Built-in migration management
 - ✅ **Flexible deployment** - Works in any environment setup
 - ✅ **Non-intrusive** - Uses separate schema from your app tables
+- ✅ **Type-safe queries** - SQLx compile-time verification for safety
 
 The `backfill` library makes job queues as easy as connecting to a database!

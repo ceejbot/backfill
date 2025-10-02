@@ -10,9 +10,25 @@ A boringly-named priority queue system for doing async work. This library and wo
 
 This is a postgres-backed async work queue library that is a set of conveniences and features on top of the rust port of Graphile Worker. It gives you a library you can integrate with your own project to handle background tasks.
 
-> **Status**: Core features are complete and tested (74.62% test coverage, 55 tests). The library is suitable for production use for job enqueueing, worker processing, and DLQ management. The Admin API (feature-gated) is experimental. See [CHANGELOG.md](CHANGELOG.md) for details and [Known Limitations](docs/DLQ.md#known-limitations).
+> **Status**: Core features are complete and tested (74.62% test coverage, 55 tests). The library is suitable for production use for job enqueueing, worker processing, and DLQ management. The Admin API (feature-gated) is experimental. See [CHANGELOG.md](CHANGELOG.md) for details and [Known Limitations](docs/02-dlq.md#known-limitations).
 
-Features:
+### What's New Over graphile_worker
+
+Built on top of `graphile_worker` (v0.8.6), backfill adds these production-ready features:
+
+- 🎯 **Priority System** - Six-level priority queue (EMERGENCY to BULK_LOWEST) with numeric priority values
+- 📦 **Named Queues** - Pre-configured Fast/Bulk queues plus custom queue support
+- 🔄 **Smart Retry Policies** - Exponential backoff with jitter (fast/aggressive/conservative presets)
+- 💀 **Dead Letter Queue (DLQ)** - Automatic failed job handling with query/requeue/deletion APIs
+- 📊 **Comprehensive Metrics** - Prometheus-compatible metrics for jobs, DLQ, and database operations
+- 🛠️ **High-Level Client API** - `BackfillClient` with ergonomic enqueueing helpers
+- 🏃 **Flexible Worker Patterns** - `WorkerRunner` supporting tokio::select!, background tasks, and one-shot processing
+- 🔧 **Admin API** - Optional Axum router for HTTP-based job management (experimental)
+- 📝 **Convenience Functions** - `enqueue_fast()`, `enqueue_bulk()`, `enqueue_critical()`, etc.
+
+All built on graphile_worker's rock-solid foundation of PostgreSQL SKIP LOCKED and LISTEN/NOTIFY.
+
+### Features
 
 - **Priority queues**: EMERGENCY, FAST_HIGH, FAST_DEFAULT, BULK_DEFAULT, BULK_LOW, BULK_LOWEST
 - **Named queues**: Fast, Bulk, DeadLetter, Custom(name)
@@ -23,26 +39,25 @@ Features:
 - **Error handling**: Automatic retry classification
 - **Metrics**: Comprehensive metrics via the `metrics` crate - bring your own exporter (Prometheus, StatsD, etc.)
 - **Monitoring**: Structured logging and tracing throughout
-- **Building blocks for an axum admin api**: via a router you can mount on your own axum api server.
+- **Building blocks for an axum admin api**: via a router you can mount on your own axum api server
 
 Look at the `examples/` directory and the readme there for practical usage examples.
 
 ## Documentation
 
-### Core Guides
+Read these in order for the best learning experience:
 
-- **[Dead Letter Queue (DLQ) Guide](docs/DLQ.md)** - Comprehensive guide to handling failed jobs, including:
-  - How the DLQ works and why it's essential
-  - Client API and HTTP admin API usage
-  - Operational best practices for production
-  - Monitoring, alerting, and troubleshooting
-  - Common workflows for handling failures
-- **[Admin API Reference](docs/ADMIN_API.md)** - HTTP API for job management and monitoring
-- **[Metrics Guide](docs/METRICS.md)** - Comprehensive metrics for Prometheus, StatsD, and other backends
-- **[Database Setup](docs/DATABASE_SETUP.md)** - PostgreSQL configuration and schema management
-- **[DLQ Migrations](docs/DLQ_MIGRATIONS.md)** - Migration strategies for the DLQ schema
-- **[SQLx Setup](docs/SQLX_SETUP.md)** - Compile-time query verification setup
-- **[Testing Guide](docs/TESTING.md)** - Testing strategies for workers and jobs
+1. **[Database Setup](docs/01-database-setup.md)** - PostgreSQL configuration, automatic schema management, and SQLx compile-time verification
+2. **[Dead Letter Queue (DLQ)](docs/02-dlq.md)** - Comprehensive guide to handling failed jobs:
+   - How the DLQ works and why it's essential
+   - Client API and HTTP admin API usage
+   - Operational best practices for production
+   - Monitoring, alerting, and troubleshooting
+   - Common workflows for handling failures
+3. **[Metrics Guide](docs/03-metrics.md)** - Comprehensive metrics for Prometheus, StatsD, and other backends
+4. **[Admin API Reference](docs/04-admin-api.md)** - HTTP API for job management and monitoring (experimental)
+5. **[Testing Guide](docs/05-testing.md)** - Testing strategies for workers and jobs with isolated schemas
+6. **[DLQ Migrations](docs/06-dlq-migrations.md)** - Migration strategies for the DLQ schema in production
 
 ## Configuration and setup
 
@@ -56,7 +71,7 @@ All configuration is passed in via environment variables:
 
 ### SQLx Compile-Time Query Verification
 
-This library is designed to take advantage of SQLx's compile-time query verification for production safety. Set `DATABASE_URL` during compilation to enable type-safe, compile-time checked SQL queries:
+This library uses SQLx's compile-time query verification for production safety. Set `DATABASE_URL` during compilation to enable type-safe, compile-time checked SQL queries:
 
 ```bash
 export DATABASE_URL="postgresql://localhost:5432/backfill"
@@ -69,7 +84,7 @@ cargo sqlx prepare  # Generates .sqlx/sqlx-data.json
 cargo build         # Uses cached metadata, no database required
 ```
 
-See [`docs/SQLX_SETUP.md`](docs/SQLX_SETUP.md) for detailed setup instructions and best practices.
+See [Database Setup](docs/01-database-setup.md#sqlx-compile-time-query-verification) for detailed setup instructions and best practices.
 
 ### Automatic Setup
 
@@ -92,7 +107,7 @@ psql -d your_database -f docs/dlq_schema.sql
 sed 's/graphile_worker/your_schema/g' docs/dlq_schema.sql | psql -d your_database
 ```
 
-See [`docs/DLQ_MIGRATIONS.md`](docs/DLQ_MIGRATIONS.md) for detailed migration instructions and integration with popular migration tools.
+See [DLQ Migrations](docs/06-dlq-migrations.md) for detailed migration instructions and integration with popular migration tools.
 
 ## LICENSE
 
