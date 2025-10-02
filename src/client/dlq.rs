@@ -235,6 +235,13 @@ impl BackfillClient {
             })
             .collect();
 
+        // Record DLQ age metrics for monitoring
+        let now = Utc::now();
+        for job in &jobs {
+            let age_seconds = (now - job.failed_at).num_seconds() as f64;
+            crate::metrics::record_dlq_age(&job.task_identifier, age_seconds);
+        }
+
         // Get total count for pagination (simplified - could be optimized)
         let count_query = format!("SELECT COUNT(*) FROM {}.backfill_dlq", self.schema);
         let total: i64 = sqlx::query_scalar(&count_query)
@@ -266,24 +273,32 @@ impl BackfillClient {
 
         let row = sqlx::query(&query).bind(dlq_id).fetch_optional(&self.pool).await?;
 
-        Ok(row.map(|row| DlqJob {
-            id: row.get("id"),
-            original_job_id: row.get("original_job_id"),
-            task_identifier: row.get("task_identifier"),
-            payload: row.get("payload"),
-            queue_name: row.get("queue_name"),
-            priority: row.get("priority"),
-            job_key: row.get("job_key"),
-            max_attempts: row.get("max_attempts"),
-            failure_reason: row.get("failure_reason"),
-            failure_count: row.get("failure_count"),
-            last_error: row.get("last_error"),
-            original_created_at: row.get("original_created_at"),
-            original_run_at: row.get("original_run_at"),
-            failed_at: row.get("failed_at"),
-            requeued_count: row.get("requeued_count"),
-            last_requeued_at: row.get("last_requeued_at"),
-            notes: row.get("notes"),
+        Ok(row.map(|row| {
+            let job = DlqJob {
+                id: row.get("id"),
+                original_job_id: row.get("original_job_id"),
+                task_identifier: row.get("task_identifier"),
+                payload: row.get("payload"),
+                queue_name: row.get("queue_name"),
+                priority: row.get("priority"),
+                job_key: row.get("job_key"),
+                max_attempts: row.get("max_attempts"),
+                failure_reason: row.get("failure_reason"),
+                failure_count: row.get("failure_count"),
+                last_error: row.get("last_error"),
+                original_created_at: row.get("original_created_at"),
+                original_run_at: row.get("original_run_at"),
+                failed_at: row.get("failed_at"),
+                requeued_count: row.get("requeued_count"),
+                last_requeued_at: row.get("last_requeued_at"),
+                notes: row.get("notes"),
+            };
+
+            // Record DLQ age metric
+            let age_seconds = (Utc::now() - job.failed_at).num_seconds() as f64;
+            crate::metrics::record_dlq_age(&job.task_identifier, age_seconds);
+
+            job
         }))
     }
 

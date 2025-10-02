@@ -387,6 +387,9 @@ impl WorkerRunner {
             self.config.dlq_processor_interval.is_some()
         );
 
+        // Record worker starting (increment active worker count)
+        crate::metrics::update_worker_active("worker", 1);
+
         // Start DLQ processor if configured
         let dlq_handle = if let Some(interval) = self.config.dlq_processor_interval {
             log::info!("Starting DLQ processor (interval_secs: {})", interval.as_secs());
@@ -421,6 +424,8 @@ impl WorkerRunner {
                     }
                     Err(e) => {
                         log::error!("Worker task failed: {}", e);
+                        // Decrement worker count before returning error
+                        crate::metrics::update_worker_active("worker", 0);
                         return Err(BackfillError::WorkerRuntime(e.to_string()));
                     }
                 }
@@ -436,6 +441,9 @@ impl WorkerRunner {
                 Err(_) => log::warn!("DLQ processor shutdown timeout"),
             }
         }
+
+        // Record worker stopping (decrement active worker count)
+        crate::metrics::update_worker_active("worker", 0);
 
         log::info!("Worker runner stopped");
         Ok(())

@@ -18,9 +18,21 @@ This design keeps the library backend-agnostic while providing comprehensive obs
 
 The library automatically emits these metrics without any user code:
 
+**Job Operations:**
 - **`backfill_jobs_enqueued`** - Recorded when you call `client.enqueue()`
-- **`backfill_dlq_*`** - All DLQ operations (jobs added, requeued, deleted, size gauges)
-- **`backfill_db_operations`** - Database operation counts and durations
+
+**DLQ Operations:**
+- **`backfill_dlq_jobs_added`** - Jobs moved to DLQ
+- **`backfill_dlq_jobs_requeued`** - Jobs requeued from DLQ
+- **`backfill_dlq_jobs_deleted`** - Jobs deleted from DLQ
+- **`backfill_dlq_size`** - Current DLQ size (with task breakdown)
+- **`backfill_dlq_age_seconds`** - Age histogram of DLQ jobs (emitted when querying DLQ)
+
+**Worker Lifecycle:**
+- **`backfill_worker_active`** - Active worker count (gauge)
+
+**Database Operations:**
+- **`backfill_db_operations`** - Operation counts and durations
 
 **You get these for free** - just install a metrics recorder!
 
@@ -30,10 +42,22 @@ Due to GraphileWorker's architecture, these metrics require manual instrumentati
 
 - **`backfill_jobs_started/completed/failed`** - Job lifecycle events
 - **`backfill_jobs_duration_seconds`** - Job execution time
-- **`backfill_jobs_wait_time_seconds`** - Queue latency
-- **`backfill_retries_attempted/exhausted`** - Retry metrics
 
 **Don't worry** - we provide easy-to-use helpers! See [Manual Instrumentation](#manual-instrumentation) below.
+
+### ⏳ Future Enhancements (Require GraphileWorker Hooks)
+
+These metrics are planned but require either GraphileWorker to add lifecycle hooks or using a fork with hooks:
+
+- **`backfill_jobs_wait_time_seconds`** - Queue latency (enqueue to start)
+- **`backfill_queue_depth`** - Current queue depth by queue
+- **`backfill_queue_active_jobs`** - Active jobs being processed
+- **`backfill_worker_utilization`** - Worker utilization percentage
+- **`backfill_worker_polls`** - Worker poll operation results
+- **`backfill_retries_attempted`** - Retry attempt tracking
+- **`backfill_retries_exhausted`** - Jobs that exceeded max retries
+
+These require access to GraphileWorker's internal state that isn't currently exposed. For now, you can approximate some of these with database queries or application-level tracking.
 
 ## Quick Start
 

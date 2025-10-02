@@ -134,6 +134,10 @@ pub fn record_job_duration(queue: &str, task: &str, status: &str, duration_secs:
 }
 
 /// Record job wait time (enqueue to start)
+///
+/// Note: Currently unused - requires GraphileWorker lifecycle hooks to provide
+/// job creation time. Will be enabled when hooks are available.
+#[allow(dead_code)]
 pub(crate) fn record_job_wait_time(
     queue: &str,
     task: &str,
@@ -154,6 +158,10 @@ pub(crate) fn record_job_wait_time(
 }
 
 /// Update queue depth gauge
+///
+/// Note: Currently unused - requires periodic polling or GraphileWorker hooks.
+/// Can be implemented with background task if needed.
+#[allow(dead_code)]
 pub(crate) fn update_queue_depth(queue: &str, depth: i64) {
     metrics::gauge!(
         "backfill_queue_depth",
@@ -163,6 +171,9 @@ pub(crate) fn update_queue_depth(queue: &str, depth: i64) {
 }
 
 /// Update active jobs gauge
+///
+/// Note: Currently unused - requires GraphileWorker to expose active job count.
+#[allow(dead_code)]
 pub(crate) fn update_active_jobs(queue: &str, count: i64) {
     metrics::gauge!(
         "backfill_queue_active_jobs",
@@ -234,6 +245,10 @@ pub(crate) fn update_worker_active(queue: &str, count: i32) {
 }
 
 /// Update worker utilization
+///
+/// Note: Currently unused - requires GraphileWorker to expose concurrency
+/// state.
+#[allow(dead_code)]
 pub(crate) fn update_worker_utilization(queue: &str, utilization: f64) {
     metrics::gauge!(
         "backfill_worker_utilization",
@@ -243,6 +258,9 @@ pub(crate) fn update_worker_utilization(queue: &str, utilization: f64) {
 }
 
 /// Record a worker poll operation
+///
+/// Note: Currently unused - requires GraphileWorker to expose poll events.
+#[allow(dead_code)]
 pub(crate) fn record_worker_poll(queue: &str, result: &str) {
     metrics::counter!(
         "backfill_worker_polls",
@@ -264,6 +282,10 @@ pub(crate) fn record_retry_attempted(task: &str, queue: &str, attempt: i16) {
 }
 
 /// Record retries exhausted
+///
+/// Note: Currently unused - requires GraphileWorker lifecycle hooks to detect
+/// when a job has exhausted all retry attempts.
+#[allow(dead_code)]
 pub(crate) fn record_retries_exhausted(task: &str, max_attempts: i16) {
     metrics::counter!(
         "backfill_retries_exhausted",

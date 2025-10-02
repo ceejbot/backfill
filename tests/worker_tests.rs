@@ -7,7 +7,6 @@ use backfill::{
     WorkerRunner,
 };
 use serde::{Deserialize, Serialize};
-use sqlx;
 use tokio_util::sync::CancellationToken;
 
 /// Simple test job for worker tests
