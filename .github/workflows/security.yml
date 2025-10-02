@@ -1,5 +1,5 @@
 ---
-name: CI
+name: Security
 
 on:
     push:
@@ -28,7 +28,7 @@ jobs:
             - name: get cargo-audit the fast way
               shell: bash
               run: |
-                  if [[ -z $(which cargo-audit ]]; then
+                  if [[ -z $(which cargo-audit) ]]; then
                     curl -sLo cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.21.2/cargo-audit-x86_64-unknown-linux-gnu-v0.21.2.tgz
                     tar xfz cargo-audit.tgz
                     mv cargo-audit-x86_64-unknown-linux-gnu-v0.21.2/cargo-audit ~/.cargo/bin/cargo-audit

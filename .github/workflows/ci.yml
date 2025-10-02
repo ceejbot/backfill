@@ -58,7 +58,7 @@ jobs:
                   fi
 
             - name: Check formatting
-              run: cargo +nightly fmt --check --all -F axum
+              run: cargo +nightly fmt --check --all
 
             - name: Run clippy
               run: cargo +stable clippy --all-targets -- -D warnings
