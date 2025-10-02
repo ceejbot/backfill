@@ -38,6 +38,11 @@ axum = "0.8"
 fastrand = "2.0"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
+# Examples that require specific features
+[[example]]
+name = "admin_server"
+required-features = ["axum"]
+
 [lints.rust]
 unsafe_code = { level = "deny", priority = 1 }
 future_incompatible = { level = "deny", priority = 2 }

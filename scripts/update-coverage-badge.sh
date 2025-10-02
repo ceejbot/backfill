@@ -29,8 +29,14 @@ fi
 echo "Badge color: $COLOR"
 
 # Update README.md
-COVERAGE_ESCAPED=$(echo "$COVERAGE" | sed 's/%/%25/g')
-sed -i.bak "s/coverage-[0-9]*\.[0-9]*%25-[a-z]*/coverage-${COVERAGE_ESCAPED}-${COLOR}/" README.md
+if [[ -n $(which sd) ]]; then
+	COVERAGE_ESCAPED=$(echo "$COVERAGE" | sd -s '%' '%25')
+	sd "coverage-[0-9]*\.[0-9]*%25-[a-z]*" "coverage-${COVERAGE_ESCAPED}-${COLOR}" README.md
+else
+	COVERAGE_ESCAPED=$(echo "$COVERAGE" | sed 's/%/%25/g')
+	sed -i.bak "s/coverage-[0-9]*\.[0-9]*%25-[a-z]*/coverage-${COVERAGE_ESCAPED}-${COLOR}/" README.md
+	echo "Backup saved as README.md.bak"
+fi
+
 
 echo "Updated coverage badge in README.md to $COVERAGE ($COLOR)"
-echo "Backup saved as README.md.bak"
