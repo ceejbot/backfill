@@ -14,6 +14,7 @@ The Dead Letter Queue (DLQ) is a critical operational feature for handling jobs 
 - [Monitoring and Alerting](#monitoring-and-alerting)
 - [Common Workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
+- [Known Limitations](#known-limitations)
 
 ## What is the DLQ?
 
@@ -872,6 +873,67 @@ ON graphile_worker.backfill_dlq (failed_at DESC);
 
 -- For very large DLQ tables, consider partitioning by failed_at
 ```
+
+## Known Limitations
+
+The DLQ system is fully functional for production use, but has a few known limitations:
+
+### 1. Queue Name Tracking
+
+**Issue**: DLQ entries may show `queue_name` as `"default"` even if the job ran in a different queue (e.g., "fast" or "bulk").
+
+**Cause**: The GraphileWorker `Job` struct doesn't expose the queue name field, so when jobs are moved to the DLQ, the queue name defaults to `"default"`.
+
+**Workarounds**:
+- The `task_identifier` field is always accurate and can be used for filtering
+- Job priority is preserved, which often correlates with queue assignment
+- For critical workflows, track queue assignment in your application logs or metrics
+
+**Future**: This will be resolved when GraphileWorker exposes queue_name on the Job struct, or when we implement direct database querying.
+
+### 2. Payload Visibility
+
+**Issue**: DLQ entries show `payload` as empty JSON `{}` when queried via the API.
+
+**Cause**: GraphileWorker's `jobs` view doesn't include the payload column for performance reasons.
+
+**Workarounds**:
+- Query the underlying `_private_jobs` table directly for payload inspection:
+  ```sql
+  SELECT payload
+  FROM graphile_worker._private_jobs
+  WHERE id = $1;
+  ```
+- Implement custom DLQ queries in your application that join to the jobs table
+- Use structured logging in your job handlers to capture payloads before failures
+
+**Impact**: Low - most DLQ workflows focus on error messages and retry logic rather than payload inspection.
+
+**Future**: A future release may add an optional full-payload mode for DLQ queries.
+
+### 3. Job Cancellation
+
+**Issue**: The Admin API's job cancellation endpoint (`DELETE /jobs/:job_id`) is not yet implemented.
+
+**Status**: Returns 501 NOT_IMPLEMENTED
+
+**Workaround**:
+- Jobs can be marked as failed directly in the database if needed
+- Implement graceful shutdown in your job handlers to respect cancellation tokens
+- Use job expiration (`run_at` in the future) to prevent old jobs from running
+
+### Summary
+
+These limitations are minor and don't affect the core DLQ functionality:
+- ✅ **Job failure tracking** - Works perfectly
+- ✅ **Error message capture** - Fully functional
+- ✅ **Requeuing workflows** - Production-ready
+- ✅ **Statistics and monitoring** - Complete
+- ⚠️ **Queue name tracking** - Shows "default" for all queues
+- ⚠️ **Payload inspection** - Requires direct DB access
+- ⚠️ **Job cancellation** - Not yet implemented
+
+For most production use cases, the current implementation provides all needed functionality for managing failed jobs effectively.
 
 ## See Also
 

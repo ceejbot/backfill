@@ -1,5 +1,7 @@
 # Backfill Admin API
 
+> **⚠️ EXPERIMENTAL**: The Admin API is currently experimental and subject to change. Several endpoints return stub data or are not fully implemented. For production use, rely on the core job enqueueing and worker APIs which are stable. See [API Status](#api-status) below for details.
+
 The Backfill Admin API provides a library-first HTTP API for managing job queues, monitoring system health, and administering the Dead Letter Queue (DLQ). The API is designed to be easily integrated into existing Axum applications.
 
 ## Quick Start
@@ -257,3 +259,45 @@ curl -X POST http://localhost:3000/admin/backfill/jobs \
 # List DLQ jobs
 curl "http://localhost:3000/admin/backfill/dlq?limit=10"
 ```
+
+## API Status
+
+The following table shows the current implementation status of each endpoint:
+
+| Endpoint | Method | Status | Notes |
+|----------|--------|--------|-------|
+| `/health` | GET | ✅ **Stable** | Fully implemented, production-ready |
+| `/jobs` | POST | ✅ **Stable** | Fully implemented, production-ready |
+| `/jobs/:job_id` | GET | ⚠️ **Stub** | Returns 501 NOT_IMPLEMENTED |
+| `/jobs/:job_id` | DELETE | ⚠️ **Stub** | Returns 501 NOT_IMPLEMENTED |
+| `/status` | GET | ⚠️ **Partial** | Returns hardcoded zero values |
+| `/queues` | GET | ⚠️ **Partial** | Returns hardcoded "fast" and "bulk" queues |
+| `/queues/:queue_name/stats` | GET | ⚠️ **Partial** | Returns hardcoded zero values |
+| `/dlq` | GET | ✅ **Stable** | Fully implemented with filtering and pagination |
+| `/dlq/stats` | GET | ✅ **Stable** | Fully implemented with task-level breakdowns |
+| `/dlq/jobs/:job_id` | GET | ✅ **Stable** | Fully implemented |
+| `/dlq/jobs/:job_id/requeue` | POST | ✅ **Stable** | Fully implemented |
+| `/dlq/jobs/:job_id` | DELETE | ✅ **Stable** | Fully implemented |
+| `/dlq/requeue` | POST | ✅ **Stable** | Fully implemented with criteria filtering |
+| `/dlq/cleanup` | POST | ⚠️ **Stub** | Returns 501 NOT_IMPLEMENTED |
+
+### Stable Features
+
+All **DLQ management endpoints** are fully implemented and production-ready:
+- Querying DLQ with filters
+- Getting DLQ statistics
+- Requeuing jobs (individually or in batches)
+- Deleting jobs from DLQ
+
+The **health check** and **job enqueueing** endpoints are also stable.
+
+### Planned Improvements
+
+The following endpoints are planned for future releases:
+- **Job introspection** - Querying individual jobs by ID
+- **Job cancellation** - Canceling running or pending jobs
+- **Dynamic queue discovery** - Real-time queue listing from database
+- **Live queue statistics** - Real-time metrics for each queue
+- **DLQ batch cleanup** - Automated cleanup with criteria
+
+If you need these features, consider contributing! See the implementation patterns in `/Users/ceej/code/personal/rust/backfill/src/admin.rs`.

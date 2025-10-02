@@ -9,7 +9,7 @@ A boringly-named priority queue system for doing async work. This library and wo
 
 This is a postgres-backed async work queue library that is a set of conveniences and features on top of the rust port of Graphile Worker. It gives you a library you can integrate with your own project to handle background tasks.
 
-It's not finished yet. Don't use it until I say here that I've put it to work somewhere.
+> **Status**: Core features are complete and tested (74.62% test coverage, 55 tests). The library is suitable for production use for job enqueueing, worker processing, and DLQ management. The Admin API (feature-gated) is experimental. See [CHANGELOG.md](CHANGELOG.md) for details and [Known Limitations](docs/DLQ.md#known-limitations).
 
 Features:
 

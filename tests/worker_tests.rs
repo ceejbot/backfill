@@ -7,6 +7,7 @@ use backfill::{
     WorkerRunner,
 };
 use serde::{Deserialize, Serialize};
+use sqlx;
 use tokio_util::sync::CancellationToken;
 
 /// Simple test job for worker tests
@@ -286,20 +287,61 @@ async fn test_worker_runner_run_until_cancelled() -> Result<(), BackfillError> {
 
 #[tokio::test]
 async fn test_worker_runner_process_available_jobs() -> Result<(), BackfillError> {
+    use backfill::enqueue_fast;
+    use uuid::Uuid;
+
+    // Use unique schema for test isolation
+    let schema = format!("test_process_{}", Uuid::new_v4().simple());
     let config = WorkerConfig::new(get_test_database_url())
-        .with_schema("test_worker_process")
+        .with_schema(&schema)
         .with_dlq_processor_interval(None);
 
+    // Create worker and client
     let worker = WorkerRunner::builder(config)
         .await?
         .define_job::<SimpleTestJob>()
         .build()
         .await?;
 
-    // This is currently a stub that returns 0
+    let client = worker.client();
+
+    // Enqueue some test jobs
+    let job1 = SimpleTestJob {
+        message: "Test 1".to_string(),
+    };
+    let job2 = SimpleTestJob {
+        message: "Test 2".to_string(),
+    };
+    let job3 = SimpleTestJob {
+        message: "Test 3".to_string(),
+    };
+
+    enqueue_fast(client, SimpleTestJob::IDENTIFIER, &job1, None).await?;
+    enqueue_fast(client, SimpleTestJob::IDENTIFIER, &job2, None).await?;
+    enqueue_fast(client, SimpleTestJob::IDENTIFIER, &job3, None).await?;
+
+    // Process all available jobs
     let processed = worker.process_available_jobs().await?;
 
+    // Note: Returns 0 because job counting isn't implemented yet
+    // But the jobs should still be processed successfully
     assert_eq!(processed, 0);
+
+    // Verify jobs were actually processed by checking the database
+    // Jobs should be completed and removed from the queue
+    let remaining: (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE is_available = true",
+        schema
+    ))
+    .fetch_one(client.pool())
+    .await?;
+
+    assert_eq!(remaining.0, 0, "All jobs should have been processed");
+
+    // Clean up schema
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+        .execute(client.pool())
+        .await?;
 
     Ok(())
 }

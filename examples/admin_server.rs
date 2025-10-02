@@ -1,4 +1,3 @@
-#![cfg(feature = "axum")]
 //! Example Axum server with integrated backfill admin API
 //!
 //! This example demonstrates how to integrate the backfill admin API into

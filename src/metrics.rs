@@ -14,9 +14,9 @@
 //! - DLQ operations (add, requeue, delete)
 //! - Database operations
 //!
-//! Job lifecycle metrics (start, completion, failure) require manual instrumentation
-//! in your task handlers due to GraphileWorker limitations. Use the public helper
-//! functions in this module to add metrics to your handlers.
+//! Job lifecycle metrics (start, completion, failure) require manual
+//! instrumentation in your task handlers due to GraphileWorker limitations. Use
+//! the public helper functions in this module to add metrics to your handlers.
 
 use chrono::{DateTime, Utc};
 
@@ -72,7 +72,8 @@ pub(crate) fn record_job_enqueued(queue: &str, task: &str, priority: i16) {
 
 /// Record a job starting execution
 ///
-/// Call this at the beginning of your TaskHandler::run() method to track when jobs start.
+/// Call this at the beginning of your TaskHandler::run() method to track when
+/// jobs start.
 ///
 /// # Example
 /// ```rust,ignore
@@ -293,8 +294,9 @@ pub(crate) fn record_db_operation_duration(operation: &str, duration_secs: f64) 
 
 /// Helper for instrumenting job execution with metrics
 ///
-/// This helper automatically records job start, duration, and completion/failure metrics.
-/// Use it to wrap your job logic for automatic metric collection.
+/// This helper automatically records job start, duration, and
+/// completion/failure metrics. Use it to wrap your job logic for automatic
+/// metric collection.
 ///
 /// # Example
 /// ```rust,ignore

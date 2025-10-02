@@ -463,17 +463,43 @@ impl WorkerRunner {
     /// you want to process the current job queue without running a persistent
     /// worker.
     ///
-    /// Returns the number of jobs processed across all workers.
+    /// This method processes all jobs that are currently available (where
+    /// `run_at <= now()`), respecting the configured concurrency limit.
+    /// Jobs are processed in priority order (lower priority number = higher
+    /// priority), then by `run_at` timestamp.
+    ///
+    /// The method returns when:
+    /// - All available jobs have been processed
+    /// - No more jobs are available to process
+    ///
+    /// Note: This method currently returns 0 as an accurate job count would
+    /// require additional instrumentation. The jobs are still processed
+    /// correctly.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(0)` on success (job count tracking not yet implemented).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if worker initialization or job processing fails.
     pub async fn process_available_jobs(&self) -> Result<usize, BackfillError> {
         log::info!("Processing available jobs (one-shot mode)");
 
-        // For now, this is a simplified implementation
-        // In a full implementation, we'd query the job count and process them
-        // without starting the persistent polling loop
+        // Create worker instance
+        let worker = self.create_worker().await?;
 
-        log::warn!("process_available_jobs is not yet fully implemented");
-        log::info!("Consider using run_until_cancelled with a short timeout instead");
+        // Use GraphileWorker's run_once() method which processes all available jobs
+        // and returns when the queue is empty
+        worker
+            .run_once()
+            .await
+            .map_err(|e| BackfillError::WorkerRuntime(e.to_string()))?;
 
+        log::info!("Finished processing available jobs");
+
+        // Note: Returning 0 for now as accurate counting would require additional
+        // instrumentation. Consider using metrics or hooks to track job counts.
         Ok(0)
     }
 
