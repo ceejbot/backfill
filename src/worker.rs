@@ -13,36 +13,38 @@
 //!
 //! ## Kubernetes-style `select!` Integration
 //! ```rust,no_run
-//! use backfill::{WorkerRunner, WorkerConfig, QueueConfig};
+//! use backfill::{WorkerRunner, WorkerConfig, QueueConfig, TaskHandler, WorkerContext, IntoTaskHandlerResult};
 //! use tokio_util::sync::CancellationToken;
 //! use std::time::Duration;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct MyJob { data: String }
+//!
+//! impl TaskHandler for MyJob {
+//!     const IDENTIFIER: &'static str = "my_job";
+//!     async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+//!         Ok::<(), String>(())
+//!     }
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let config = WorkerConfig {
-//!         database_url: "postgresql://localhost/myapp".to_string(),
-//!         schema: "jobs".to_string(),
-//!         queue_configs: vec![
-//!             QueueConfig::default_queue(10),
-//!             QueueConfig::named_queue("bulk", 50),
-//!         ],
-//!         poll_interval: Duration::from_millis(100),
-//!         dlq_processor_interval: Some(Duration::from_secs(30)),
-//!     };
+//!     let config = WorkerConfig::new("postgresql://localhost/myapp")
+//!         .with_schema("jobs");
 //!
-//!     let worker = WorkerRunner::new(config).await?;
+//!     let worker = WorkerRunner::builder(config).await?
+//!         .define_job::<MyJob>()
+//!         .build().await?;
+//!
 //!     let shutdown_token = CancellationToken::new();
 //!
 //!     tokio::select! {
-//!         result = run_axum_server() => {
-//!             eprintln!("Axum server failed: {:?}", result);
-//!             result?;
-//!         }
 //!         result = worker.run_until_cancelled(shutdown_token.clone()) => {
-//!             eprintln!("Worker failed: {:?}", result);
+//!             eprintln!("Worker stopped: {:?}", result);
 //!             result?;
 //!         }
-//!         _ = wait_for_shutdown_signal() => {
+//!         _ = tokio::signal::ctrl_c() => {
 //!             println!("Shutting down gracefully");
 //!             shutdown_token.cancel();
 //!         }
@@ -54,19 +56,33 @@
 //!
 //! ## Background Task Integration
 //! ```rust,no_run
-//! use backfill::{WorkerRunner, WorkerConfig};
+//! use backfill::{WorkerRunner, WorkerConfig, TaskHandler, WorkerContext, IntoTaskHandlerResult};
 //! use tokio_util::sync::CancellationToken;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct MyJob { data: String }
+//!
+//! impl TaskHandler for MyJob {
+//!     const IDENTIFIER: &'static str = "my_job";
+//!     async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+//!         Ok::<(), String>(())
+//!     }
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let worker = WorkerRunner::new(WorkerConfig::default()).await?;
+//!     let worker = WorkerRunner::builder(WorkerConfig::default()).await?
+//!         .define_job::<MyJob>()
+//!         .build().await?;
+//!
 //!     let shutdown_token = CancellationToken::new();
 //!
 //!     // Start worker in background
 //!     let worker_handle = worker.spawn_background(shutdown_token.clone());
 //!
-//!     // Run your application
-//!     run_my_application().await?;
+//!     // Run your application (e.g., HTTP server)
+//!     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 //!
 //!     // Shutdown worker
 //!     shutdown_token.cancel();

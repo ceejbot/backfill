@@ -29,7 +29,7 @@
 //!         backfill: BackfillClient::new("postgresql://localhost/mydb").await?,
 //!     };
 //!
-//!     let app = Router::new()
+//!     let app: Router = Router::new()
 //!         .nest("/admin/backfill", create_admin_router())
 //!         .with_state(state);
 //!
