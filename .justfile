@@ -5,7 +5,21 @@ _help:
 
 # Run all tests using nextest.
 test:
+	#!/usr/bin/env bash
+	if ! psql -lqtA | grep -q "^backfill_test|" ; then
+		createdb backfill_test
+	fi
+	export DATABASE_URL="postgresql://localhost:5432/backfill_test"
 	cargo nextest run -F axum
+
+# Run the named tests using nextest.
+test-one ARG:
+	#!/usr/bin/env bash
+	if ! psql -lqtA | grep -q "^backfill_test|" ; then
+		createdb backfill_test
+	fi
+	export DATABASE_URL="postgresql://localhost:5432/backfill_test"
+	cargo nextest run -F axum {{ARG}}
 
 # get a testing coverage report
 coverage:
