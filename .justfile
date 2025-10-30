@@ -23,7 +23,21 @@ test-one ARG:
 
 # get a testing coverage report
 coverage:
-	cargo llvm-cov --all-targets --workspace --summary-only
+	#!/usr/bin/env bash
+	if ! psql -lqtA | grep -q "^backfill_test|" ; then
+		createdb backfill_test
+	fi
+	export DATABASE_URL="postgresql://localhost:5432/backfill_test"
+	cargo llvm-cov nextest --all-targets -F axum --workspace --summary-only
+
+# get the coverage percentage only
+coverage-pct:
+	#!/usr/bin/env bash
+	if ! psql -lqtA | grep -q "^backfill_test|" ; then
+		createdb backfill_test
+	fi
+	export DATABASE_URL="postgresql://localhost:5432/backfill_test"
+	cargo llvm-cov --quiet --all-targets -F axum --workspace --summary-only 2>&1 | tail -1 | cut -f4 -w
 
 # Run the nightly formatter
 fmt:
