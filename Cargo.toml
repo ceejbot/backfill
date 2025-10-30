@@ -1,6 +1,6 @@
 [package]
 name = "backfill"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A boringly-named priority work queue system for doing async tasks."
 categories = ["concurrency", "data-structures"]
@@ -21,7 +21,7 @@ log = "0.4.28"
 metrics = "0.24"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
