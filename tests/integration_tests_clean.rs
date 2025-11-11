@@ -1,6 +1,5 @@
-use backfill::BackfillError;
 type Result<T> = std::result::Result<T, BackfillError>;
-use backfill::{BackfillClient, JobSpec, Priority, Queue, enqueue_bulk, enqueue_fast};
+use backfill::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -402,4 +401,139 @@ async fn test_job_utilities() -> Result<()> {
         Ok(())
     })
     .await
+}
+
+// Test job handler for cron tests
+#[derive(Clone, Serialize, Deserialize)]
+struct CronTestHandler;
+
+impl TaskHandler for CronTestHandler {
+    const IDENTIFIER: &'static str = "cron_test_task";
+
+    async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        Ok::<(), std::io::Error>(())
+    }
+}
+
+#[tokio::test]
+async fn test_cron_schedule_registration() -> Result<()> {
+    ensure_test_database().await?;
+
+    let schema_name = format!("test_{}", Uuid::new_v4().simple());
+    let database_url = get_test_database_url();
+
+    let config = WorkerConfig {
+        database_url: database_url.clone(),
+        schema: schema_name.clone(),
+        queue_configs: vec![],
+        poll_interval: std::time::Duration::from_millis(1000),
+        dlq_processor_interval: None,
+    };
+
+    // Build worker with cron schedule - should succeed
+    let worker = WorkerRunner::builder(config)
+        .await?
+        .define_job::<CronTestHandler>()
+        .add_cron_schedule("*/5 * * * * cron_test_task")?
+        .build()
+        .await?;
+
+    // Process jobs once to ensure worker initialization completes
+    worker.process_available_jobs().await?;
+
+    // Verify cron table infrastructure exists
+    let pool = PgPool::connect(&database_url).await?;
+
+    let table_exists: (bool,) = sqlx::query_as(&format!(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{}' AND table_name = '_private_known_crontabs')",
+        schema_name
+    ))
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(table_exists.0, "Cron table should exist after worker initialization");
+
+    // Clean up
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multiple_cron_schedules() -> Result<()> {
+    ensure_test_database().await?;
+
+    let schema_name = format!("test_{}", Uuid::new_v4().simple());
+    let database_url = get_test_database_url();
+
+    let config = WorkerConfig {
+        database_url: database_url.clone(),
+        schema: schema_name.clone(),
+        queue_configs: vec![],
+        poll_interval: std::time::Duration::from_millis(1000),
+        dlq_processor_interval: None,
+    };
+
+    // Build worker with multiple cron schedules - should succeed
+    let worker = WorkerRunner::builder(config)
+        .await?
+        .define_job::<CronTestHandler>()
+        .add_cron_schedule("*/5 * * * * cron_test_task")?
+        .add_cron_schedule("0 * * * * cron_test_task")?
+        .build()
+        .await?;
+
+    // Process jobs once to ensure worker initialization completes
+    worker.process_available_jobs().await?;
+
+    // Clean up
+    let pool = PgPool::connect(&database_url).await?;
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cron_with_payload() -> Result<()> {
+    ensure_test_database().await?;
+
+    let schema_name = format!("test_{}", Uuid::new_v4().simple());
+    let database_url = get_test_database_url();
+
+    let config = WorkerConfig {
+        database_url: database_url.clone(),
+        schema: schema_name.clone(),
+        queue_configs: vec![],
+        poll_interval: std::time::Duration::from_millis(1000),
+        dlq_processor_interval: None,
+    };
+
+    // Build worker with cron schedule that includes payload - should succeed
+    let worker = WorkerRunner::builder(config)
+        .await?
+        .define_job::<CronTestHandler>()
+        .add_cron_schedule(r#"0 2 * * * cron_test_task {"key":"value"}"#)?
+        .build()
+        .await?;
+
+    // Process jobs once to ensure worker initialization completes
+    worker.process_available_jobs().await?;
+
+    // Clean up
+    let pool = PgPool::connect(&database_url).await?;
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
+        .execute(&pool)
+        .await?;
+
+    pool.close().await;
+
+    Ok(())
 }

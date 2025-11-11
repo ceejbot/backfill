@@ -213,6 +213,7 @@ pub struct WorkerOptionsBuilder {
     pub(crate) concurrency: usize,
     pub(crate) queue_name: Option<String>,
     pub(crate) job_handlers: Vec<JobHandlerConfig>,
+    pub(crate) crontabs: Vec<String>,
 }
 
 /// Configuration for a job handler that can be recreated
@@ -251,6 +252,7 @@ impl WorkerOptionsBuilder {
             concurrency,
             queue_name,
             job_handlers: Vec::new(),
+            crontabs: Vec::new(),
         })
     }
 
@@ -278,6 +280,55 @@ impl WorkerOptionsBuilder {
         self.queue_name = queue_name;
         self
     }
+
+    /// Add a cron schedule for periodic job execution
+    ///
+    /// # Syntax
+    /// The crontab format is: `<timer> <task_identifier> ?<options>
+    /// {<payload>}`
+    ///
+    /// - **Timer**: Standard 5-field cron syntax (minute hour day month
+    ///   day-of-week)
+    /// - **Task**: Must match a registered job handler's IDENTIFIER
+    /// - **Options**: Query string format for job configuration
+    ///   - `fill`: Backfill period (e.g., `?fill=10m` to execute missed runs
+    ///     within 10 minutes)
+    ///   - `job_key`: Unique identifier for deduplication
+    ///   - `job_key_mode`: How to handle duplicates (`replace`,
+    ///     `preserve_run_at`, etc.)
+    ///   - `priority`: Job priority (default: 0)
+    ///   - `max`: Maximum attempts (default: 25)
+    ///   - `queue`: Queue name (default: task identifier)
+    /// - **Payload**: Optional JSON object to pass to the job handler
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use backfill::{WorkerRunner, WorkerConfig};
+    /// # async fn example() -> Result<(), backfill::BackfillError> {
+    /// # let config = WorkerConfig::default();
+    /// WorkerRunner::builder(config).await?
+    ///     // Every 5 minutes
+    ///     .add_cron_schedule("*/5 * * * * cleanup_task")?
+    ///     // Daily at 2:00 AM with backfill
+    ///     .add_cron_schedule("0 2 * * * backup_task ?fill=1h")?
+    ///     // With payload
+    ///     .add_cron_schedule(r#"0 * * * * report_task {\"format\":\"pdf\"}"#)?
+    ///     .build().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns `BackfillError::CrontabParse` if the cron syntax is invalid.
+    pub fn add_cron_schedule(mut self, spec: &str) -> Result<Self, crate::BackfillError> {
+        // Validate the crontab spec by attempting to parse it
+        use graphile_worker_crontab_parser::parse_crontab;
+        parse_crontab(spec)?;
+
+        // Store the validated spec
+        self.crontabs.push(spec.to_string());
+        Ok(self)
+    }
 }
 
 impl From<WorkerOptionsBuilder> for WorkerOptions {
@@ -297,6 +348,13 @@ impl From<WorkerOptionsBuilder> for WorkerOptions {
         // Register all job handlers
         for handler_config in builder.job_handlers {
             worker_options = (handler_config.builder_fn)(worker_options);
+        }
+
+        // Add all cron schedules
+        for crontab_spec in builder.crontabs {
+            worker_options = worker_options
+                .with_crontab(&crontab_spec)
+                .expect("Crontab already validated in add_cron_schedule");
         }
 
         worker_options
@@ -379,6 +437,44 @@ impl WorkerRunnerBuilder {
     pub fn define_job<T: TaskHandler + 'static>(mut self) -> Self {
         self.worker_options_builder = self.worker_options_builder.define_job::<T>();
         self
+    }
+
+    /// Add a cron schedule for periodic job execution
+    ///
+    /// Schedules a task to run automatically at specified intervals using cron
+    /// syntax. The task must be registered with `define_job()` before
+    /// adding a cron schedule.
+    ///
+    /// # Syntax
+    /// `<timer> <task_identifier> ?<options> {<payload>}`
+    ///
+    /// See [`WorkerOptionsBuilder::add_cron_schedule`] for detailed syntax
+    /// documentation.
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// # use backfill::{WorkerRunner, WorkerConfig, TaskHandler, WorkerContext, IntoTaskHandlerResult};
+    /// # #[derive(Clone)]
+    /// # struct CleanupTask;
+    /// # impl TaskHandler for CleanupTask {
+    /// #     const IDENTIFIER: &'static str = "cleanup";
+    /// #     async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult { Ok(()) }
+    /// # }
+    /// # async fn example() -> Result<(), backfill::BackfillError> {
+    /// # let config = WorkerConfig::default();
+    /// let worker = WorkerRunner::builder(config).await?
+    ///     .define_job::<CleanupTask>()
+    ///     .add_cron_schedule("*/5 * * * * cleanup")?  // Every 5 minutes
+    ///     .build().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns `BackfillError::CrontabParse` if the cron syntax is invalid.
+    pub fn add_cron_schedule(mut self, spec: &str) -> Result<Self, BackfillError> {
+        self.worker_options_builder = self.worker_options_builder.add_cron_schedule(spec)?;
+        Ok(self)
     }
 
     /// Build the final WorkerRunner

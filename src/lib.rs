@@ -63,6 +63,8 @@ use chrono::{DateTime, Utc};
 // Re-export commonly used types from graphile_worker
 pub use graphile_worker::{IntoTaskHandlerResult, JobKeyMode, TaskHandler, WorkerContext, WorkerOptions};
 use graphile_worker::{Job, JobSpec as GraphileJobSpec, JobSpecBuilder};
+// Re-export crontab parsing types for advanced usage
+pub use graphile_worker_crontab_parser::{CrontabParseError, parse_crontab};
 use serde::Serialize;
 
 mod client;

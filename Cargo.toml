@@ -17,6 +17,7 @@ axum = ["dep:axum"]
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 graphile_worker = "0.8"
+graphile_worker_crontab_parser = "0.5"
 log = "0.4.28"
 metrics = "0.24"
 serde = { version = "1.0", features = ["derive"] }

@@ -35,6 +35,8 @@ pub enum BackfillError {
     #[error("Worker runtime error: {0}")]
     WorkerRuntime(String),
     #[error(transparent)]
+    CrontabParse(#[from] graphile_worker_crontab_parser::CrontabParseError),
+    #[error(transparent)]
     SqlxError(#[from] sqlx::Error),
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
