@@ -85,11 +85,12 @@ pub use retries::*;
 pub use worker::*;
 
 /// Named queues for organizing different types of work.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Queue {
     /// Fast queue for high-priority, low-latency jobs
     Fast,
     /// Bulk queue for background processing
+    #[default]
     Bulk,
     /// Dead letter queue for failed jobs
     DeadLetter,
@@ -105,12 +106,6 @@ impl Queue {
             Queue::DeadLetter => "dead_letter",
             Queue::Custom(name) => name,
         }
-    }
-}
-
-impl Default for Queue {
-    fn default() -> Self {
-        Self::Bulk
     }
 }
 
