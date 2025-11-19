@@ -453,12 +453,13 @@ impl WorkerRunnerBuilder {
     ///
     /// # Examples
     /// ```rust,no_run
+    /// # use serde::{Deserialize, Serialize};
     /// # use backfill::{WorkerRunner, WorkerConfig, TaskHandler, WorkerContext, IntoTaskHandlerResult};
-    /// # #[derive(Clone)]
+    /// # #[derive(Clone, Deserialize, Serialize)]
     /// # struct CleanupTask;
     /// # impl TaskHandler for CleanupTask {
     /// #     const IDENTIFIER: &'static str = "cleanup";
-    /// #     async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult { Ok(()) }
+    /// #     async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult { Ok::<(), backfill::BackfillError>(()) }
     /// # }
     /// # async fn example() -> Result<(), backfill::BackfillError> {
     /// # let config = WorkerConfig::default();
