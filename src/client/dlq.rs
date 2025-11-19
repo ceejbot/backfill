@@ -558,13 +558,16 @@ impl BackfillClient {
             let payload = serde_json::json!({});
             let queue_name: Option<String> = job_row.get("queue_name");
             let queue_name = queue_name.unwrap_or_else(|| "default".to_string());
-            let priority: i32 = job_row.get("priority");
+            let priority: i16 = job_row.get("priority");
             let job_key: Option<String> = job_row.get("job_key");
             let max_attempts: i16 = job_row.get("max_attempts");
             let attempts: i16 = job_row.get("attempts");
-            let last_error: Option<serde_json::Value> = job_row.get("last_error");
+            let last_error: Option<String> = job_row.get("last_error");
             let created_at: chrono::DateTime<chrono::Utc> = job_row.get("created_at");
             let run_at: chrono::DateTime<chrono::Utc> = job_row.get("run_at");
+
+            // Convert last_error from TEXT to JSONB for DLQ table
+            let last_error_json = last_error.map(|s| serde_json::Value::String(s));
 
             // Move to DLQ
             let insert_dlq_query = format!(
@@ -590,7 +593,7 @@ impl BackfillClient {
                 .bind(max_attempts as i32)
                 .bind(failure_reason)
                 .bind(attempts as i32)
-                .bind(&last_error)
+                .bind(&last_error_json)
                 .bind(created_at)
                 .bind(run_at)
                 .execute(&self.pool)
