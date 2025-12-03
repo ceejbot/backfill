@@ -602,7 +602,7 @@ impl BackfillClient {
             match insert_result {
                 Ok(_) => {
                     // Successfully moved to DLQ, now remove from main jobs table
-                    let delete_query = format!("DELETE FROM {}.jobs WHERE id = $1", self.schema);
+                    let delete_query = format!("DELETE FROM {}._private_jobs WHERE id = $1", self.schema);
                     match sqlx::query(&delete_query).bind(job_id).execute(&self.pool).await {
                         Ok(_) => {
                             moved_count += 1;
