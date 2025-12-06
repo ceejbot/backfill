@@ -194,10 +194,12 @@ async fn test_dlq_add_job_and_retrieve() {
     // Retrieve it
     let retrieved = client.get_dlq_job(dlq_job.id).await.expect("should retrieve");
 
-    assert!(retrieved.is_some());
     let retrieved = retrieved.expect("job should exist");
     assert_eq!(retrieved.id, dlq_job.id);
     assert_eq!(retrieved.task_identifier, "test_job");
+    // Retrieved job has a playload
+    assert!(retrieved.payload.is_object(), "payload is an object");
+    let _testjob: TestJob = serde_json::from_value(retrieved.payload).expect("the payload should be a test job");
 }
 
 #[tokio::test]
