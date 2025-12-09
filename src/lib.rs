@@ -109,6 +109,78 @@ impl Queue {
     }
 }
 
+/// Outcome of an enqueue operation.
+///
+/// When enqueueing a job, the result can either be:
+/// - `Enqueued(Job)`: The job was successfully created or updated
+/// - `AlreadyInProgress { job_key }`: A job with this key is currently locked
+///   by a worker
+#[derive(Debug, Clone)]
+pub enum EnqueueOutcome {
+    /// Job was successfully enqueued (either created or updated)
+    Enqueued(Box<Job>),
+    /// A job with this key is already in progress (locked by a worker).
+    /// Contains the job_key that was in conflict.
+    AlreadyInProgress { job_key: String },
+}
+
+impl EnqueueOutcome {
+    /// Returns the Job if the outcome was Enqueued, None otherwise.
+    pub fn job(&self) -> Option<&Job> {
+        match self {
+            EnqueueOutcome::Enqueued(job) => Some(job),
+            EnqueueOutcome::AlreadyInProgress { .. } => None,
+        }
+    }
+
+    /// Consumes self and returns the Job if Enqueued, None otherwise.
+    pub fn into_job(self) -> Option<Job> {
+        match self {
+            EnqueueOutcome::Enqueued(job) => Some(*job),
+            EnqueueOutcome::AlreadyInProgress { .. } => None,
+        }
+    }
+
+    /// Returns the Job if Enqueued, panics with message otherwise.
+    ///
+    /// # Panics
+    /// Panics if the outcome was AlreadyInProgress.
+    pub fn expect(self, msg: &str) -> Job {
+        match self {
+            EnqueueOutcome::Enqueued(job) => *job,
+            EnqueueOutcome::AlreadyInProgress { job_key } => {
+                panic!("{}: job_key '{}' was already in progress", msg, job_key)
+            }
+        }
+    }
+
+    /// Returns the Job if Enqueued, panics otherwise.
+    ///
+    /// # Panics
+    /// Panics if the outcome was AlreadyInProgress.
+    pub fn unwrap(self) -> Job {
+        self.expect("called `EnqueueOutcome::unwrap()` on `AlreadyInProgress` value")
+    }
+
+    /// Returns true if a job was enqueued.
+    pub fn is_enqueued(&self) -> bool {
+        matches!(self, EnqueueOutcome::Enqueued(_))
+    }
+
+    /// Returns true if the job was already in progress.
+    pub fn is_already_in_progress(&self) -> bool {
+        matches!(self, EnqueueOutcome::AlreadyInProgress { .. })
+    }
+
+    /// Returns the job_key if AlreadyInProgress, None otherwise.
+    pub fn conflicting_job_key(&self) -> Option<&str> {
+        match self {
+            EnqueueOutcome::AlreadyInProgress { job_key } => Some(job_key),
+            EnqueueOutcome::Enqueued(_) => None,
+        }
+    }
+}
+
 /// Configuration for job scheduling and execution.
 #[derive(Debug, Clone)]
 pub struct JobSpec {
@@ -223,7 +295,7 @@ pub async fn enqueue_fast<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job, BackfillError>
+) -> Result<EnqueueOutcome, BackfillError>
 where
     T: Serialize,
 {
@@ -246,7 +318,7 @@ pub async fn enqueue_bulk<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job, BackfillError>
+) -> Result<EnqueueOutcome, BackfillError>
 where
     T: Serialize,
 {
@@ -268,7 +340,7 @@ pub async fn enqueue_emergency<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job, BackfillError>
+) -> Result<EnqueueOutcome, BackfillError>
 where
     T: Serialize,
 {
@@ -290,7 +362,7 @@ pub async fn enqueue_fast_with_retries<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job, BackfillError>
+) -> Result<EnqueueOutcome, BackfillError>
 where
     T: Serialize,
 {
@@ -312,7 +384,7 @@ pub async fn enqueue_critical<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job, BackfillError>
+) -> Result<EnqueueOutcome, BackfillError>
 where
     T: Serialize,
 {
@@ -335,7 +407,7 @@ pub async fn enqueue_bulk_with_retries<T>(
     task_identifier: &str,
     payload: &T,
     job_key: Option<String>,
-) -> Result<Job, BackfillError>
+) -> Result<EnqueueOutcome, BackfillError>
 where
     T: Serialize,
 {

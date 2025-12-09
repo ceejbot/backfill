@@ -172,10 +172,12 @@ async fn test_dlq_add_job_and_retrieve() {
         number: 42,
     };
 
-    let job = client
+    let outcome = client
         .enqueue("test_job", &test_job, JobSpec::default())
         .await
         .expect("should enqueue");
+
+    let job = outcome.unwrap();
 
     // Manually add to DLQ
     let dlq_job = client
@@ -214,13 +216,13 @@ async fn test_dlq_list_with_filtering() {
             number: i,
         };
 
-        let job = client
+        let outcome = client
             .enqueue("test_job", &test_job, JobSpec::default())
             .await
             .expect("should enqueue");
 
         client
-            .add_to_dlq(&job, &format!("Failure {}", i), None)
+            .add_to_dlq(&outcome.unwrap(), &format!("Failure {}", i), None)
             .await
             .expect("should add to DLQ");
     }
@@ -272,25 +274,25 @@ async fn test_dlq_stats_with_data() {
     };
 
     for _ in 0..3 {
-        let job = client
+        let outcome = client
             .enqueue("test_job_a", &test_job, JobSpec::default())
             .await
             .expect("should enqueue");
 
         client
-            .add_to_dlq(&job, "Failure reason", None)
+            .add_to_dlq(&outcome.unwrap(), "Failure reason", None)
             .await
             .expect("should add to DLQ");
     }
 
     for _ in 0..2 {
-        let job = client
+        let outcome = client
             .enqueue("test_job_b", &test_job, JobSpec::default())
             .await
             .expect("should enqueue");
 
         client
-            .add_to_dlq(&job, "Failure reason", None)
+            .add_to_dlq(&outcome.unwrap(), "Failure reason", None)
             .await
             .expect("should add to DLQ");
     }
@@ -316,7 +318,7 @@ async fn test_dlq_requeue_job() {
         number: 99,
     };
 
-    let job = client
+    let outcome = client
         .enqueue(
             "test_job",
             &test_job,
@@ -329,7 +331,7 @@ async fn test_dlq_requeue_job() {
         .expect("should enqueue");
 
     let dlq_job = client
-        .add_to_dlq(&job, "Initial failure", None)
+        .add_to_dlq(&outcome.unwrap(), "Initial failure", None)
         .await
         .expect("should add to DLQ");
 
@@ -362,13 +364,13 @@ async fn test_dlq_delete_job() {
         number: 123,
     };
 
-    let job = client
+    let outcome = client
         .enqueue("test_job", &test_job, JobSpec::default())
         .await
         .expect("should enqueue");
 
     let dlq_job = client
-        .add_to_dlq(&job, "To be deleted", None)
+        .add_to_dlq(&outcome.unwrap(), "To be deleted", None)
         .await
         .expect("should add to DLQ");
 
@@ -403,7 +405,7 @@ async fn test_dlq_filter_by_queue() {
     };
 
     // Add jobs to different queues
-    let job1 = client
+    let outcome1 = client
         .enqueue(
             "test_job",
             &test_job,
@@ -415,7 +417,7 @@ async fn test_dlq_filter_by_queue() {
         .await
         .expect("should enqueue");
 
-    let job2 = client
+    let outcome2 = client
         .enqueue(
             "test_job",
             &test_job,
@@ -428,12 +430,12 @@ async fn test_dlq_filter_by_queue() {
         .expect("should enqueue");
 
     client
-        .add_to_dlq(&job1, "Fast queue failure", None)
+        .add_to_dlq(&outcome1.unwrap(), "Fast queue failure", None)
         .await
         .expect("should add to DLQ");
 
     client
-        .add_to_dlq(&job2, "Bulk queue failure", None)
+        .add_to_dlq(&outcome2.unwrap(), "Bulk queue failure", None)
         .await
         .expect("should add to DLQ");
 
@@ -459,7 +461,7 @@ async fn test_dlq_filter_by_time_range() {
         number: 1,
     };
 
-    let job = client
+    let outcome = client
         .enqueue("test_job", &test_job, JobSpec::default())
         .await
         .expect("should enqueue");
@@ -469,7 +471,7 @@ async fn test_dlq_filter_by_time_range() {
     let future = now + chrono::Duration::hours(1);
 
     client
-        .add_to_dlq(&job, "Failure", None)
+        .add_to_dlq(&outcome.unwrap(), "Failure", None)
         .await
         .expect("should add to DLQ");
 
@@ -516,7 +518,7 @@ async fn test_dlq_with_different_priorities() {
 
     // Add jobs with different priorities
     for priority in [Priority::EMERGENCY, Priority::FAST_HIGH, Priority::BULK_LOW] {
-        let job = client
+        let outcome = client
             .enqueue(
                 "test_job",
                 &test_job,
@@ -529,7 +531,7 @@ async fn test_dlq_with_different_priorities() {
             .expect("should enqueue");
 
         client
-            .add_to_dlq(&job, "Failure", None)
+            .add_to_dlq(&outcome.unwrap(), "Failure", None)
             .await
             .expect("should add to DLQ");
     }

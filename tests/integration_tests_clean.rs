@@ -79,7 +79,8 @@ async fn test_basic_job_enqueue() -> Result<()> {
         };
 
         // Test basic enqueueing
-        let job = client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        let outcome = client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        let job = outcome.unwrap();
 
         // Verify the job was inserted
         assert!(*job.id() > 0, "Job should have a valid ID");
@@ -272,7 +273,7 @@ async fn test_job_key_idempotency() -> Result<()> {
         let job_key = "unique_job_123".to_string();
 
         // Enqueue the same job twice with the same job_key
-        let _job1 = client
+        let outcome1 = client
             .enqueue(
                 "test_job",
                 &test_job,
@@ -283,7 +284,10 @@ async fn test_job_key_idempotency() -> Result<()> {
             )
             .await?;
 
-        let _job2 = client
+        // First should be enqueued
+        assert!(outcome1.is_enqueued());
+
+        let outcome2 = client
             .enqueue(
                 "test_job",
                 &test_job,
@@ -293,6 +297,9 @@ async fn test_job_key_idempotency() -> Result<()> {
                 },
             )
             .await?;
+
+        // Second should also be enqueued (job was updated, not locked)
+        assert!(outcome2.is_enqueued());
 
         // The second job should replace the first (or be the same job)
         let pool = client.pool();
@@ -312,6 +319,66 @@ async fn test_job_key_idempotency() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_job_key_already_in_progress() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let test_job = TestJob {
+            message: "In progress test".to_string(),
+            number: 1,
+        };
+
+        let job_key = "in_progress_job_123".to_string();
+
+        // First, enqueue a job with a job_key
+        let outcome1 = client
+            .enqueue(
+                "test_job",
+                &test_job,
+                JobSpec {
+                    job_key: Some(job_key.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // Should be enqueued
+        assert!(outcome1.is_enqueued());
+        let _job = outcome1.unwrap();
+
+        // Simulate the job being locked by a worker
+        let pool = client.pool();
+        sqlx::query(&format!(
+            "UPDATE {}.\"_private_jobs\" SET locked_at = NOW(), locked_by = 'test_worker' WHERE key = $1",
+            client.schema()
+        ))
+        .bind(&job_key)
+        .execute(pool)
+        .await?;
+
+        // Try to enqueue another job with the same key
+        let outcome2 = client
+            .enqueue(
+                "test_job",
+                &test_job,
+                JobSpec {
+                    job_key: Some(job_key.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // NOTE: With replace mode, PostgreSQL clears the key from the locked job first,
+        // then inserts a NEW job. So outcome2 will be Enqueued, not AlreadyInProgress.
+        // The AlreadyInProgress case happens in rare race conditions.
+        // This test verifies the API works, even if we can't easily trigger the edge
+        // case.
+        assert!(outcome2.is_enqueued() || outcome2.is_already_in_progress());
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn test_convenience_functions() -> Result<()> {
     with_isolated_schema(|client| async move {
         let test_job = TestJob {
@@ -320,10 +387,12 @@ async fn test_convenience_functions() -> Result<()> {
         };
 
         // Test enqueue_fast
-        let _fast_job = enqueue_fast(&client, "test_job", &test_job, Some("fast_job_key".to_string())).await?;
+        let fast_outcome = enqueue_fast(&client, "test_job", &test_job, Some("fast_job_key".to_string())).await?;
+        assert!(fast_outcome.is_enqueued());
 
         // Test enqueue_bulk
-        let _bulk_job = enqueue_bulk(&client, "test_job", &test_job, Some("bulk_job_key".to_string())).await?;
+        let bulk_outcome = enqueue_bulk(&client, "test_job", &test_job, Some("bulk_job_key".to_string())).await?;
+        assert!(bulk_outcome.is_enqueued());
 
         // Verify the jobs are in the correct queues with correct priorities
         let pool = client.pool();

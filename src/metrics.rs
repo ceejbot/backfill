@@ -70,6 +70,17 @@ pub(crate) fn record_job_enqueued(queue: &str, task: &str, priority: i16) {
     .increment(1);
 }
 
+/// Record when a job enqueue was skipped because a job with the same key is in
+/// progress
+pub(crate) fn record_job_already_in_progress(queue: &str, task: &str) {
+    metrics::counter!(
+        "backfill_jobs_already_in_progress",
+        "queue" => queue.to_string(),
+        "task" => task.to_string(),
+    )
+    .increment(1);
+}
+
 /// Record a job starting execution
 ///
 /// Call this at the beginning of your TaskHandler::run() method to track when

@@ -209,7 +209,8 @@ async fn test_worker_runner_client_access() -> Result<(), BackfillError> {
         message: "test".to_string(),
     };
 
-    let job = client.enqueue("simple_test_job", &test_job, Default::default()).await?;
+    let outcome = client.enqueue("simple_test_job", &test_job, Default::default()).await?;
+    let job = outcome.unwrap();
 
     assert!(*job.id() > 0);
 

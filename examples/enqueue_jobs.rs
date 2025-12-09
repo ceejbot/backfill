@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         should_fail: Some(false),
     };
 
-    let job = client
+    let outcome = client
         .enqueue(
             "example_job",
             &example_job,
@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "✉️  Enqueued ExampleJob: {} (job_id: {})",
         example_job.message,
-        job.id()
+        outcome.unwrap().id()
     );
 
     // Enqueue a high-priority email job using the convenience function
@@ -103,14 +103,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         template: Some("welcome".to_string()),
     };
 
-    let job = enqueue_fast(
+    let outcome = enqueue_fast(
         &client,
         "send_email",
         &email_job,
         Some("welcome-email-user123".to_string()),
     )
     .await?;
-    println!("📧 Enqueued SendEmailJob to: {} (job_id: {})", email_job.to, job.id());
+    println!(
+        "📧 Enqueued SendEmailJob to: {} (job_id: {})",
+        email_job.to,
+        outcome.unwrap().id()
+    );
 
     // Enqueue a bulk processing job
     let process_job = ProcessUserDataJob {
@@ -119,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         batch_size: Some(100),
     };
 
-    let job = enqueue_bulk(
+    let outcome = enqueue_bulk(
         &client,
         "process_user_data",
         &process_job,
@@ -129,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "📊 Enqueued ProcessUserDataJob for user: {} (job_id: {})",
         process_job.user_id,
-        job.id()
+        outcome.unwrap().id()
     );
 
     // Enqueue a scheduled report generation job (delayed by 30 seconds)
@@ -140,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recipients: vec!["admin@example.com".to_string(), "manager@example.com".to_string()],
     };
 
-    let job = client
+    let outcome = client
         .enqueue(
             "generate_report",
             &report_job,
@@ -156,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "📈 Enqueued GenerateReportJob (scheduled for 30s): {} report (job_id: {})",
         report_job.report_type,
-        job.id()
+        outcome.unwrap().id()
     );
 
     // Enqueue a job that will fail (for testing error handling)
@@ -166,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         should_fail: Some(true),
     };
 
-    let job = client
+    let outcome = client
         .enqueue(
             "example_job",
             &failing_job,
@@ -180,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!(
         "💥 Enqueued failing ExampleJob for error testing (job_id: {})",
-        job.id()
+        outcome.unwrap().id()
     );
 
     println!("\n🔄 Demonstrating exponential backoff retry policies...");
@@ -194,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         template: Some("alert".to_string()),
     };
 
-    let job = enqueue_critical(
+    let outcome = enqueue_critical(
         &client,
         "send_email",
         &critical_job,
@@ -203,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!(
         "🚨 Enqueued critical alert with aggressive retries (job_id: {})",
-        job.id()
+        outcome.unwrap().id()
     );
 
     // Enqueue a job with fast retries for quick turnaround
@@ -213,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         should_fail: Some(false),
     };
 
-    let job = enqueue_fast_with_retries(
+    let outcome = enqueue_fast_with_retries(
         &client,
         "example_job",
         &notification_job,
@@ -222,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!(
         "⚡ Enqueued fast notification with quick retries (job_id: {})",
-        job.id()
+        outcome.unwrap().id()
     );
 
     // Enqueue a bulk job with conservative retries
@@ -232,14 +236,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         batch_size: Some(1000),
     };
 
-    let job = enqueue_bulk_with_retries(
+    let outcome = enqueue_bulk_with_retries(
         &client,
         "process_user_data",
         &bulk_job,
         Some("bulk-export-789".to_string()),
     )
     .await?;
-    println!("📦 Enqueued bulk job with conservative retries (job_id: {})", job.id());
+    println!(
+        "📦 Enqueued bulk job with conservative retries (job_id: {})",
+        outcome.unwrap().id()
+    );
 
     // Enqueue a job with custom retry policy
     let custom_retry_policy = RetryPolicy::new(
@@ -257,7 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recipients: vec!["data-team@example.com".to_string()],
     };
 
-    let job = client
+    let outcome = client
         .enqueue(
             "generate_report",
             &custom_job,
@@ -272,7 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!(
         "📊 Enqueued analytics job with custom retry policy (job_id: {})",
-        job.id()
+        outcome.unwrap().id()
     );
 
     println!("\n🎯 All jobs enqueued successfully!");

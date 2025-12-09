@@ -329,9 +329,19 @@ impl BackfillClient {
         };
 
         // Enqueue the job
-        let job = self
+        let outcome = self
             .enqueue(&dlq_job.task_identifier, &dlq_job.payload, spec.clone())
             .await?;
+
+        let job = match outcome {
+            crate::EnqueueOutcome::Enqueued(job) => job,
+            crate::EnqueueOutcome::AlreadyInProgress { job_key } => {
+                return Err(BackfillError::RuntimeError(format!(
+                    "Cannot requeue DLQ job {}: a job with key '{}' is already in progress",
+                    dlq_id, job_key
+                )));
+            }
+        };
 
         // Record metrics
         crate::metrics::record_dlq_job_requeued(&dlq_job.task_identifier, spec.queue.as_str());
@@ -361,7 +371,7 @@ impl BackfillClient {
             .execute(&self.pool)
             .await?;
 
-        Ok(job)
+        Ok(*job)
     }
 
     /// Delete a job from the DLQ permanently.

@@ -257,7 +257,7 @@ where
     }
 
     match client.enqueue(&req.task_identifier, &req.payload, spec).await {
-        Ok(job) => {
+        Ok(crate::EnqueueOutcome::Enqueued(job)) => {
             let response = EnqueueJobResponse {
                 job_id: job.id().to_string(),
                 status: "enqueued".to_string(),
@@ -266,6 +266,17 @@ where
 
             info!("Successfully enqueued job: id={}", job.id());
             Ok(Json(response))
+        }
+        Ok(crate::EnqueueOutcome::AlreadyInProgress { job_key }) => {
+            // Return 409 Conflict for already in progress
+            warn!("Job already in progress: job_key={}", job_key);
+            Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::new(
+                    format!("Job with key '{}' is already in progress", job_key),
+                    "JOB_ALREADY_IN_PROGRESS",
+                )),
+            ))
         }
         Err(e) => {
             error!("Failed to enqueue job: {}", e);

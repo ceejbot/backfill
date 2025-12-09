@@ -97,11 +97,14 @@ async fn send_notification(
     };
 
     match state.backfill.enqueue("send_email", &email_req, spec).await {
-        Ok(job) => Ok(Json(serde_json::json!({
-            "status": "enqueued",
-            "job_id": job.id(),
-            "message": format!("Email queued for {}", email_req.to)
-        }))),
+        Ok(outcome) => {
+            let job = outcome.unwrap();
+            Ok(Json(serde_json::json!({
+                "status": "enqueued",
+                "job_id": job.id(),
+                "message": format!("Email queued for {}", email_req.to)
+            })))
+        }
         Err(e) => {
             error!("Failed to enqueue email: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
