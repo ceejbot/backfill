@@ -4,15 +4,15 @@ The backfill library provides comprehensive metrics using the [`metrics`](https:
 
 ## Metrics Philosophy
 
-**Automatic where possible, easy when manual:**
-- ✅ **Automatic metrics** for operations the library controls (enqueueing, DLQ, database)
-- 🛠️ **Easy manual instrumentation** for job lifecycle (helper utilities provided)
+**Automatic where possible, plugins for job lifecycle:**
+- ✅ **Automatic metrics** for operations the library controls (enqueueing, DLQ, database, worker lifecycle)
+- 🔌 **Lifecycle hook plugins** for job-level metrics (start, complete, fail, duration)
 - 🎯 **Bring your own backend** - install any metrics recorder (Prometheus, StatsD, etc.)
 - 📊 **Zero overhead** when no recorder is installed
 
 This design keeps the library backend-agnostic while providing comprehensive observability.
 
-## Automatic vs Manual Metrics
+## Automatic vs Plugin-Based Metrics
 
 ### ✅ Automatically Emitted
 
@@ -20,6 +20,7 @@ The library automatically emits these metrics without any user code:
 
 **Job Operations:**
 - **`backfill_jobs_enqueued`** - Recorded when you call `client.enqueue()`
+- **`backfill_jobs_already_in_progress`** - Enqueue skipped due to duplicate job key
 
 **DLQ Operations:**
 - **`backfill_dlq_jobs_added`** - Jobs moved to DLQ
@@ -36,28 +37,21 @@ The library automatically emits these metrics without any user code:
 
 **You get these for free** - just install a metrics recorder!
 
-### 🛠️ Manual Instrumentation Required
+### 🔌 Plugin-Based Metrics (Lifecycle Hooks)
 
-Due to GraphileWorker's architecture, these metrics require manual instrumentation in your task handlers:
+For job lifecycle metrics, use lifecycle hook plugins instead of manual instrumentation:
 
-- **`backfill_jobs_started/completed/failed`** - Job lifecycle events
-- **`backfill_jobs_duration_seconds`** - Job execution time
+- **`jobs_started/completed/failed`** - Job lifecycle events
+- **`job_duration_seconds`** - Job execution time (automatically tracked!)
+- **`job_wait_time_seconds`** - Queue latency (time from enqueue to start)
 
-**Don't worry** - we provide easy-to-use helpers! See [Manual Instrumentation](#manual-instrumentation) below.
+**Benefits of lifecycle hooks:**
+- ✨ Automatic duration tracking (no timers needed!)
+- ✨ Rich context (will_retry flag, attempt number, job metadata)
+- ✨ No code in job handlers (centralized metrics)
+- ✨ Consistent across all jobs
 
-### ⏳ Future Enhancements (Require GraphileWorker Hooks)
-
-These metrics are planned but require either GraphileWorker to add lifecycle hooks or using a fork with hooks:
-
-- **`backfill_jobs_wait_time_seconds`** - Queue latency (enqueue to start)
-- **`backfill_queue_depth`** - Current queue depth by queue
-- **`backfill_queue_active_jobs`** - Active jobs being processed
-- **`backfill_worker_utilization`** - Worker utilization percentage
-- **`backfill_worker_polls`** - Worker poll operation results
-- **`backfill_retries_attempted`** - Retry attempt tracking
-- **`backfill_retries_exhausted`** - Jobs that exceeded max retries
-
-These require access to GraphileWorker's internal state that isn't currently exposed. For now, you can approximate some of these with database queries or application-level tracking.
+See `docs/07-plugins.md` and `examples/metrics_plugin.rs` for how to implement a metrics plugin.
 
 ## Quick Start
 
@@ -83,122 +77,128 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 2. Add Manual Instrumentation to Jobs (Optional but Recommended)
+### 2. Add a Metrics Plugin for Job Lifecycle (Optional but Recommended)
 
 ```rust
-use backfill::{TaskHandler, WorkerContext, IntoTaskHandlerResult};
+use backfill::{LifecycleHooks, JobCompleteContext, JobFailContext, WorkerRunner};
 
-struct MyJob {
-    data: String,
-}
+#[derive(Clone)]
+struct MetricsPlugin;
 
-impl TaskHandler for MyJob {
-    const IDENTIFIER: &'static str = "my_job";
+impl LifecycleHooks for MetricsPlugin {
+    async fn on_job_complete(&self, ctx: JobCompleteContext) {
+        let task = &ctx.job.task_identifier;
+        let duration = ctx.duration.as_secs_f64();
 
-    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        // Option A: Use the JobMetrics helper (easiest!)
-        backfill::metrics::JobMetrics::new("fast", Self::IDENTIFIER, &ctx)
-            .instrument(|| async {
-                // Your job logic here
-                process_data(&self.data).await
-            })
-            .await
+        metrics::counter!("jobs_completed", "task" => task.clone()).increment(1);
+        metrics::histogram!("job_duration_seconds",
+            "task" => task.clone(),
+            "status" => "success"
+        ).record(duration);
+    }
+
+    async fn on_job_fail(&self, ctx: JobFailContext) {
+        let status = if ctx.will_retry { "retrying" } else { "failed" };
+        metrics::counter!("jobs_failed",
+            "task" => ctx.job.task_identifier.clone(),
+            "status" => status
+        ).increment(1);
     }
 }
 
-async fn process_data(data: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Do work...
-    Ok(())
-}
+// Add plugin when building worker
+let worker = WorkerRunner::builder(config).await?
+    .define_job::<MyJob>()
+    .add_plugin(MetricsPlugin)  // Handles ALL jobs automatically!
+    .build().await?;
 ```
 
-That's it! You now have comprehensive observability.
+That's it! You now have comprehensive observability. See `examples/metrics_plugin.rs` for a complete example.
 
-## Manual Instrumentation
+## Implementing Job Metrics with Lifecycle Hooks
 
-For job lifecycle metrics, you need to add instrumentation to your task handlers. We provide two approaches:
-
-### Approach 1: JobMetrics Helper (Recommended)
-
-The `JobMetrics` helper automatically handles all metrics for you:
+Instead of manual instrumentation in each job handler, implement a metrics plugin once and it applies to all jobs:
 
 ```rust
-use backfill::{TaskHandler, WorkerContext, IntoTaskHandlerResult, metrics::JobMetrics};
+use backfill::{
+    LifecycleHooks, JobStartContext, JobCompleteContext,
+    JobFailContext, JobPermanentlyFailContext,
+};
 
-impl TaskHandler for MyJob {
-    const IDENTIFIER: &'static str = "my_job";
+#[derive(Clone)]
+struct MetricsPlugin;
 
-    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        JobMetrics::new("fast", Self::IDENTIFIER, &ctx)
-            .instrument(|| async {
-                // Your job logic
-                do_work().await
-            })
-            .await
+impl LifecycleHooks for MetricsPlugin {
+    async fn on_job_start(&self, ctx: JobStartContext) {
+        metrics::counter!("jobs_started",
+            "task" => ctx.job.task_identifier.clone()
+        ).increment(1);
     }
+
+    async fn on_job_complete(&self, ctx: JobCompleteContext) {
+        let task = &ctx.job.task_identifier;
+        let duration = ctx.duration.as_secs_f64();  // Duration tracked automatically!
+
+        metrics::counter!("jobs_completed",
+            "task" => task.clone(),
+            "attempt" => ctx.job.attempts.to_string()
+        ).increment(1);
+
+        metrics::histogram!("job_duration_seconds",
+            "task" => task.clone(),
+            "status" => "success"
+        ).record(duration);
+    }
+
+    async fn on_job_fail(&self, ctx: JobFailContext) {
+        let task = &ctx.job.task_identifier;
+
+        // Use will_retry flag for better metrics!
+        let status = if ctx.will_retry { "retrying" } else { "failed" };
+
+        metrics::counter!("jobs_failed",
+            "task" => task.clone(),
+            "will_retry" => status,
+            "attempt" => ctx.job.attempts.to_string()
+        ).increment(1);
+
+        // Classify the error
+        let error_type = classify_error(&ctx.error);
+        metrics::counter!("job_errors_by_type",
+            "task" => task.clone(),
+            "error_type" => error_type
+        ).increment(1);
+    }
+
+    async fn on_job_permanently_fail(&self, ctx: JobPermanentlyFailContext) {
+        metrics::counter!("jobs_permanently_failed",
+            "task" => ctx.job.task_identifier.clone()
+        ).increment(1);
+    }
+}
+
+fn classify_error(error: &str) -> &'static str {
+    let msg = error.to_lowercase();
+    if msg.contains("timeout") { "timeout" }
+    else if msg.contains("network") { "network" }
+    else if msg.contains("not found") { "not_found" }
+    else if msg.contains("unauthorized") { "unauthorized" }
+    else if msg.contains("forbidden") { "forbidden" }
+    else if msg.contains("validation") { "validation" }
+    else if msg.contains("rate limit") { "rate_limit" }
+    else if msg.contains("unavailable") { "unavailable" }
+    else { "unknown" }
 }
 ```
 
-**What it does:**
-- ✅ Records job start (`backfill_jobs_started`)
-- ✅ Records completion/failure (`backfill_jobs_completed` / `backfill_jobs_failed`)
-- ✅ Records duration (`backfill_jobs_duration_seconds`)
-- ✅ Records retry attempts (`backfill_retries_attempted`) if applicable
-- ✅ Classifies error types automatically
+**Advantages over manual instrumentation:**
+- ✨ Duration automatically tracked (no timers needed!)
+- ✨ `will_retry` flag tells you if failure is transient
+- ✨ No code in job handlers (cleaner separation)
+- ✨ Consistent metrics across all jobs
+- ✨ Rich job metadata available (attempts, priority, created_at, etc.)
 
-### Approach 2: Manual Calls
-
-For more control, call the metric functions directly:
-
-```rust
-use backfill::{TaskHandler, WorkerContext, IntoTaskHandlerResult, metrics};
-
-impl TaskHandler for MyJob {
-    const IDENTIFIER: &'static str = "my_job";
-
-    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        let start = std::time::Instant::now();
-        let attempt = *ctx.job().attempts();
-
-        // Record start
-        metrics::record_job_started("fast", Self::IDENTIFIER);
-
-        // Do work
-        let result = do_work().await;
-
-        // Record completion
-        let duration = start.elapsed().as_secs_f64();
-        match &result {
-            Ok(_) => {
-                metrics::record_job_completed("fast", Self::IDENTIFIER, attempt);
-                metrics::record_job_duration("fast", Self::IDENTIFIER, "success", duration);
-            }
-            Err(e) => {
-                let error_type = metrics::classify_error_for_metrics(e.as_ref());
-                metrics::record_job_failed("fast", Self::IDENTIFIER, error_type, attempt);
-                metrics::record_job_duration("fast", Self::IDENTIFIER, "failed", duration);
-            }
-        }
-
-        result
-    }
-}
-```
-
-### Error Classification
-
-The `classify_error_for_metrics()` function automatically categorizes errors into standard types:
-
-- `timeout` - Timeout errors
-- `network` - Network/connection errors
-- `not_found` - 404-style errors
-- `unauthorized` / `forbidden` - Auth errors
-- `validation` - Validation failures
-- `rate_limit` - Rate limit errors
-- `unavailable` - Service unavailable
-- `unknown` - Everything else
-
-You can also pass your own error type string for more specific classification.
+See `examples/metrics_plugin.rs` for a complete working example and `docs/07-plugins.md` for comprehensive documentation.
 
 ## Metric Categories
 

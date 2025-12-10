@@ -98,7 +98,7 @@ async fn send_notification(
 
     match state.backfill.enqueue("send_email", &email_req, spec).await {
         Ok(outcome) => {
-            let job = outcome.unwrap();
+            let job = outcome.expect("outcome should contain a job");
             Ok(Json(serde_json::json!({
                 "status": "enqueued",
                 "job_id": job.id(),

@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "✉️  Enqueued ExampleJob: {} (job_id: {})",
         example_job.message,
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     // Enqueue a high-priority email job using the convenience function
@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "📧 Enqueued SendEmailJob to: {} (job_id: {})",
         email_job.to,
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     // Enqueue a bulk processing job
@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "📊 Enqueued ProcessUserDataJob for user: {} (job_id: {})",
         process_job.user_id,
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     // Enqueue a scheduled report generation job (delayed by 30 seconds)
@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "📈 Enqueued GenerateReportJob (scheduled for 30s): {} report (job_id: {})",
         report_job.report_type,
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     // Enqueue a job that will fail (for testing error handling)
@@ -184,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!(
         "💥 Enqueued failing ExampleJob for error testing (job_id: {})",
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     println!("\n🔄 Demonstrating exponential backoff retry policies...");
@@ -207,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!(
         "🚨 Enqueued critical alert with aggressive retries (job_id: {})",
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     // Enqueue a job with fast retries for quick turnaround
@@ -226,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!(
         "⚡ Enqueued fast notification with quick retries (job_id: {})",
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     // Enqueue a bulk job with conservative retries
@@ -245,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!(
         "📦 Enqueued bulk job with conservative retries (job_id: {})",
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     // Enqueue a job with custom retry policy
@@ -279,7 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!(
         "📊 Enqueued analytics job with custom retry policy (job_id: {})",
-        outcome.unwrap().id()
+        outcome.expect("outcome should contain a job").id()
     );
 
     println!("\n🎯 All jobs enqueued successfully!");
