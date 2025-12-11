@@ -205,6 +205,57 @@ async fn test_dlq_add_job_and_retrieve() {
 }
 
 #[tokio::test]
+async fn test_process_failed_jobs_preserves_payload() {
+    let client = setup_test_client("dlq_payload_preservation").await;
+    client.init_dlq().await.expect("DLQ init should work");
+
+    // Enqueue a job with specific payload
+    let test_payload = TestJob {
+        message: "unique test message for process_failed_jobs".to_string(),
+        number: 12345,
+    };
+
+    let outcome = client
+        .enqueue(
+            "test_job",
+            &test_payload,
+            JobSpec {
+                max_attempts: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("should enqueue");
+
+    let job = outcome.unwrap();
+
+    // Simulate job failure by updating attempts to match max_attempts
+    sqlx::query(&format!(
+        "UPDATE {}._private_jobs SET attempts = max_attempts WHERE id = $1",
+        client.schema()
+    ))
+    .bind(job.id())
+    .execute(client.pool())
+    .await
+    .expect("should update job");
+
+    // Process failed jobs
+    let moved = client.process_failed_jobs().await.expect("should process");
+    assert_eq!(moved, 1);
+
+    // Verify payload was preserved
+    let dlq_jobs = client.list_dlq_jobs(DlqFilter::default()).await.expect("should list");
+    assert_eq!(dlq_jobs.jobs.len(), 1);
+
+    let dlq_job = &dlq_jobs.jobs[0];
+    let recovered: TestJob =
+        serde_json::from_value(dlq_job.payload.clone()).expect("payload should deserialize to TestJob");
+
+    assert_eq!(recovered.message, "unique test message for process_failed_jobs");
+    assert_eq!(recovered.number, 12345);
+}
+
+#[tokio::test]
 async fn test_dlq_list_with_filtering() {
     let client = setup_test_client("dlq_list_filter").await;
     client.init_dlq().await.expect("DLQ init should work");

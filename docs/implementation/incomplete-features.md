@@ -147,29 +147,7 @@ let queue_name = "default";
 - Query GraphileWorker schema to get queue info
 - Check if newer graphile_worker versions expose this field
 
-### 9. DLQ payload limitation
-**Location:** `src/client/dlq.rs:542-543`
-
-**Current State:** Uses empty JSON object `{}` as placeholder for payload when moving failed jobs to DLQ
-
-**Issue:** GraphileWorker's jobs view doesn't include the payload field
-
-**Code:**
-```rust
-// Payload is not available in the jobs view, use empty object as placeholder
-let payload = serde_json::json!({});
-```
-
-**Affects:** `process_failed_jobs()` method - jobs moved to DLQ will have empty payloads
-
-**Impact:** Cannot inspect actual job payload from DLQ, only metadata
-
-**Possible Solutions:**
-- Query the underlying jobs table directly (not the view)
-- Store payload in a separate field during initial job processing
-- Accept this limitation and document it clearly
-
-### 10. DLQ pagination optimization
+### 9. DLQ pagination optimization
 **Location:** `src/client/dlq.rs:238`
 
 **Current State:** Uses separate COUNT query for pagination, could be more efficient
@@ -253,8 +231,8 @@ pub(crate) struct JobHandlerConfig {
 - All feature-gated, so not blocking main library use
 
 **Low Priority (workarounds exist):**
-- 3 known limitations with acceptable workarounds
+- 2 known limitations with acceptable workarounds
 - 2 documentation TODOs
 - 1 dead code cleanup
 
-**Total Items:** 13
+**Total Items:** 12

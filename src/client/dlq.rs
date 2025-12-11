@@ -542,19 +542,22 @@ impl BackfillClient {
     pub async fn process_failed_jobs(&self) -> Result<u32, BackfillError> {
         // Find jobs that have failed permanently (attempts >= max_attempts)
         // and haven't been processed yet
-        // Note: The jobs view doesn't include payload, so we'll handle this limitation
         let find_failed_jobs_query = format!(
             r#"
-            SELECT id, task_identifier, queue_name, priority, key as job_key,
-                   max_attempts, attempts, last_error, created_at, run_at, updated_at
-            FROM {}.jobs
-            WHERE attempts >= max_attempts
-              AND max_attempts > 0
-              AND id NOT IN (SELECT COALESCE(original_job_id, -1) FROM {}.backfill_dlq)
-            ORDER BY updated_at ASC
+            SELECT jobs.id, tasks.identifier AS task_identifier,
+                   job_queues.queue_name, jobs.priority, jobs.key as job_key,
+                   jobs.max_attempts, jobs.attempts, jobs.last_error,
+                   jobs.created_at, jobs.run_at, jobs.updated_at, jobs.payload
+            FROM {}._private_jobs AS jobs
+            INNER JOIN {}._private_tasks AS tasks ON tasks.id = jobs.task_id
+            LEFT JOIN {}._private_job_queues AS job_queues ON job_queues.id = jobs.job_queue_id
+            WHERE jobs.attempts >= jobs.max_attempts
+              AND jobs.max_attempts > 0
+              AND jobs.id NOT IN (SELECT COALESCE(original_job_id, -1) FROM {}.backfill_dlq)
+            ORDER BY jobs.updated_at ASC
             LIMIT 100
         "#,
-            self.schema, self.schema
+            self.schema, self.schema, self.schema, self.schema
         );
 
         let failed_jobs = sqlx::query(&find_failed_jobs_query).fetch_all(&self.pool).await?;
@@ -564,8 +567,7 @@ impl BackfillClient {
         for job_row in failed_jobs {
             let job_id: i64 = job_row.get("id");
             let task_identifier: String = job_row.get("task_identifier");
-            // Payload is not available in the jobs view, use empty object as placeholder
-            let payload = serde_json::json!({});
+            let payload: serde_json::Value = job_row.get("payload");
             let queue_name: Option<String> = job_row.get("queue_name");
             let queue_name = queue_name.unwrap_or_else(|| "default".to_string());
             let priority: i16 = job_row.get("priority");
