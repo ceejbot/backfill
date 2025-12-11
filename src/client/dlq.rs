@@ -465,10 +465,20 @@ impl BackfillClient {
     ) -> Result<DlqJob, BackfillError> {
         let start = std::time::Instant::now();
 
-        // Note: Job doesn't have queue_name field, so we'll use "default" for now
-        // In production, this would need to be tracked elsewhere or passed as a
-        // parameter
-        let queue_name = "default";
+        // Query queue_name from job_queue_id
+        let queue_name = if let Some(queue_id) = original_job.job_queue_id() {
+            let query = format!(
+                "SELECT queue_name FROM {}._private_job_queues WHERE id = $1",
+                self.schema
+            );
+            sqlx::query_scalar::<_, String>(&query)
+                .bind(queue_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .unwrap_or_else(|| "default".to_string())
+        } else {
+            "default".to_string()
+        };
 
         let insert_query = format!(
             r#"

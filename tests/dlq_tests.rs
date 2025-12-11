@@ -256,6 +256,41 @@ async fn test_process_failed_jobs_preserves_payload() {
 }
 
 #[tokio::test]
+async fn test_add_to_dlq_preserves_queue_name() {
+    let client = setup_test_client("dlq_queue_name").await;
+    client.init_dlq().await.expect("DLQ init should work");
+
+    let test_job = TestJob {
+        message: "queue name test".to_string(),
+        number: 999,
+    };
+
+    // Enqueue to "fast" queue
+    let outcome = client
+        .enqueue(
+            "test_job",
+            &test_job,
+            JobSpec {
+                queue: Queue::Fast,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("should enqueue");
+
+    let job = outcome.unwrap();
+
+    // Add to DLQ
+    let dlq_job = client
+        .add_to_dlq(&job, "Test failure", None)
+        .await
+        .expect("should add to DLQ");
+
+    // Verify queue_name was preserved
+    assert_eq!(dlq_job.queue_name, "fast");
+}
+
+#[tokio::test]
 async fn test_dlq_list_with_filtering() {
     let client = setup_test_client("dlq_list_filter").await;
     client.init_dlq().await.expect("DLQ init should work");

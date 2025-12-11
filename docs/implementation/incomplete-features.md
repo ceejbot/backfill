@@ -124,30 +124,7 @@ QueueStatus {
 
 ## Low Priority - Known Limitations/Workarounds
 
-### 8. DLQ queue_name tracking
-**Location:** `src/client/dlq.rs:443-446`
-
-**Current State:** Uses hardcoded "default" queue name when adding jobs to DLQ
-
-**Issue:** `Job` struct from graphile_worker doesn't expose queue_name field
-
-**Code:**
-```rust
-// Note: Job doesn't have queue_name field, so we'll use "default" for now
-// In production, this would need to be tracked elsewhere or passed as a
-// parameter
-let queue_name = "default";
-```
-
-**Affects:** `add_to_dlq()` method
-
-**Possible Solutions:**
-- Add queue_name parameter to `add_to_dlq()`
-- Track queue_name in application state
-- Query GraphileWorker schema to get queue info
-- Check if newer graphile_worker versions expose this field
-
-### 9. DLQ pagination optimization
+### 8. DLQ pagination optimization
 **Location:** `src/client/dlq.rs:238`
 
 **Current State:** Uses separate COUNT query for pagination, could be more efficient
@@ -231,8 +208,8 @@ pub(crate) struct JobHandlerConfig {
 - All feature-gated, so not blocking main library use
 
 **Low Priority (workarounds exist):**
-- 2 known limitations with acceptable workarounds
+- 1 known limitation with acceptable workaround
 - 2 documentation TODOs
 - 1 dead code cleanup
 
-**Total Items:** 12
+**Total Items:** 11
