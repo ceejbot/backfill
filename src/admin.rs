@@ -85,6 +85,129 @@ pub struct SystemStatus {
     pub total_jobs: i64,
 }
 
+/// Get statistics for a specific queue from the database
+async fn get_queue_stats(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    queue_name: &str,
+) -> Result<QueueStatus, (StatusCode, String)> {
+    // Query for pending jobs (not locked, ready to run)
+    let pending_query = format!(
+        r#"
+        SELECT COUNT(*)
+        FROM {}._private_jobs j
+        LEFT JOIN {}._private_job_queues q ON j.job_queue_id = q.id
+        WHERE COALESCE(q.queue_name, 'default') = $1
+          AND j.locked_at IS NULL
+          AND j.run_at <= NOW()
+          AND j.attempts < j.max_attempts
+        "#,
+        schema, schema
+    );
+
+    let pending_jobs = sqlx::query_scalar::<_, i64>(&pending_query)
+        .bind(queue_name)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to query pending jobs: {}", e),
+            )
+        })?;
+
+    // Query for active jobs (currently locked by workers)
+    let active_query = format!(
+        r#"
+        SELECT COUNT(*)
+        FROM {}._private_jobs j
+        LEFT JOIN {}._private_job_queues q ON j.job_queue_id = q.id
+        WHERE COALESCE(q.queue_name, 'default') = $1
+          AND j.locked_at IS NOT NULL
+        "#,
+        schema, schema
+    );
+
+    let active_jobs = sqlx::query_scalar::<_, i64>(&active_query)
+        .bind(queue_name)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to query active jobs: {}", e),
+            )
+        })?;
+
+    // Query for failed jobs (attempts >= max_attempts)
+    let failed_query = format!(
+        r#"
+        SELECT COUNT(*)
+        FROM {}._private_jobs j
+        LEFT JOIN {}._private_job_queues q ON j.job_queue_id = q.id
+        WHERE COALESCE(q.queue_name, 'default') = $1
+          AND j.attempts >= j.max_attempts
+          AND j.max_attempts > 0
+        "#,
+        schema, schema
+    );
+
+    let failed_jobs = sqlx::query_scalar::<_, i64>(&failed_query)
+        .bind(queue_name)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to query failed jobs: {}", e),
+            )
+        })?;
+
+    Ok(QueueStatus {
+        queue_name: queue_name.to_string(),
+        pending_jobs,
+        active_jobs,
+        completed_jobs: 0, // GraphileWorker deletes completed jobs - use metrics system
+        failed_jobs,
+    })
+}
+
+/// Get all queue names from the database
+async fn get_all_queue_names(pool: &sqlx::PgPool, schema: &str) -> Result<Vec<String>, (StatusCode, String)> {
+    let query = format!(
+        "SELECT DISTINCT queue_name FROM {}._private_job_queues ORDER BY queue_name",
+        schema
+    );
+
+    let queue_names = sqlx::query_scalar::<_, String>(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to query queue names: {}", e),
+            )
+        })?;
+
+    // Include "default" if there are any jobs without a queue
+    let has_default_jobs_query = format!(
+        "SELECT EXISTS(SELECT 1 FROM {}._private_jobs WHERE job_queue_id IS NULL)",
+        schema
+    );
+
+    let has_default_jobs = sqlx::query_scalar::<_, bool>(&has_default_jobs_query)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+
+    let mut all_queues = queue_names;
+    if has_default_jobs && !all_queues.contains(&"default".to_string()) {
+        all_queues.insert(0, "default".to_string());
+    }
+
+    Ok(all_queues)
+}
+
 /// Job enqueueing request
 #[derive(Deserialize)]
 pub struct EnqueueJobRequest {
@@ -181,35 +304,51 @@ async fn health_check() -> Result<Json<HealthResponse>, StatusCode> {
     Ok(Json(response))
 }
 
-/// System status endpoint - GET /status  
+/// System status endpoint - GET /status
 async fn system_status<S>(State(state): State<S>) -> Result<Json<SystemStatus>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
-    let _client = state.backfill_client();
+    let client = state.backfill_client();
+    let pool = client.pool();
+    let schema = client.schema();
 
-    // For now, return a basic status. In a real implementation, you'd query
-    // the database for actual queue statistics
+    // Get all queue names
+    let queue_names = get_all_queue_names(pool, schema)
+        .await
+        .map_err(|(status, msg)| (status, Json(ErrorResponse::new(msg, "QUERY_ERROR"))))?;
+
+    // Get stats for each queue
+    let mut queue_stats = Vec::new();
+    for queue_name in queue_names {
+        let stats = get_queue_stats(pool, schema, &queue_name)
+            .await
+            .map_err(|(status, msg)| (status, Json(ErrorResponse::new(msg, "QUERY_ERROR"))))?;
+        queue_stats.push(stats);
+    }
+
+    // Get DLQ stats
+    let dlq_stats = client.dlq_stats().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                format!("Failed to get DLQ stats: {}", e),
+                "DLQ_ERROR",
+            )),
+        )
+    })?;
+
+    // Calculate total jobs across all queues
+    let total_jobs: i64 = queue_stats
+        .iter()
+        .map(|q| q.pending_jobs + q.active_jobs + q.failed_jobs)
+        .sum();
+
     let status = SystemStatus {
-        queues: vec![
-            QueueStatus {
-                queue_name: "fast".to_string(),
-                pending_jobs: 0,
-                active_jobs: 0,
-                completed_jobs: 0,
-                failed_jobs: 0,
-            },
-            QueueStatus {
-                queue_name: "bulk".to_string(),
-                pending_jobs: 0,
-                active_jobs: 0,
-                completed_jobs: 0,
-                failed_jobs: 0,
-            },
-        ],
+        queues: queue_stats,
         dlq_enabled: true,
-        dlq_job_count: 0,
-        total_jobs: 0,
+        dlq_job_count: dlq_stats.total_jobs as i64,
+        total_jobs,
     };
 
     info!("Retrieved system status: {} queues", status.queues.len());
@@ -329,50 +468,44 @@ where
 }
 
 /// List queues endpoint - GET /queues
-async fn list_queues<S>(State(_state): State<S>) -> Result<Json<Vec<QueueStatus>>, (StatusCode, Json<ErrorResponse>)>
+async fn list_queues<S>(State(state): State<S>) -> Result<Json<Vec<QueueStatus>>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
-    // This would query the actual queue statistics from the database
-    // For now, return static data
-    let queues = vec![
-        QueueStatus {
-            queue_name: "fast".to_string(),
-            pending_jobs: 0,
-            active_jobs: 0,
-            completed_jobs: 0,
-            failed_jobs: 0,
-        },
-        QueueStatus {
-            queue_name: "bulk".to_string(),
-            pending_jobs: 0,
-            active_jobs: 0,
-            completed_jobs: 0,
-            failed_jobs: 0,
-        },
-    ];
+    let client = state.backfill_client();
+    let pool = client.pool();
+    let schema = client.schema();
 
-    info!("Listed {} queues", queues.len());
-    Ok(Json(queues))
+    // Get all queue names
+    let queue_names = get_all_queue_names(pool, schema)
+        .await
+        .map_err(|(status, msg)| (status, Json(ErrorResponse::new(msg, "QUERY_ERROR"))))?;
+
+    // Get stats for each queue
+    let mut queue_stats = Vec::new();
+    for queue_name in queue_names {
+        let stats = get_queue_stats(pool, schema, &queue_name)
+            .await
+            .map_err(|(status, msg)| (status, Json(ErrorResponse::new(msg, "QUERY_ERROR"))))?;
+        queue_stats.push(stats);
+    }
+
+    info!("Listed {} queues", queue_stats.len());
+    Ok(Json(queue_stats))
 }
 
 /// Queue stats endpoint - GET /queues/:queue_name/stats
 async fn queue_stats<S>(
-    State(_state): State<S>,
+    State(state): State<S>,
     Path(queue_name): Path<String>,
 ) -> Result<Json<QueueStatus>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
-    // This would query the actual queue statistics from the database
-    // For now, return static data
-    let stats = QueueStatus {
-        queue_name: queue_name.clone(),
-        pending_jobs: 0,
-        active_jobs: 0,
-        completed_jobs: 0,
-        failed_jobs: 0,
-    };
+    let client = state.backfill_client();
+    let stats = get_queue_stats(client.pool(), client.schema(), &queue_name)
+        .await
+        .map_err(|(status, msg)| (status, Json(ErrorResponse::new(msg, "QUERY_ERROR"))))?;
 
     info!("Retrieved stats for queue: {}", queue_name);
     Ok(Json(stats))

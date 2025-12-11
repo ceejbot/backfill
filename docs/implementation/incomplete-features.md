@@ -61,52 +61,7 @@ These are all feature-gated behind the `axum` feature flag.
 
 **Notes:** May need to research GraphileWorker's cancellation mechanism
 
-### 4. Admin API: system_status()
-**Location:** `src/admin.rs:185-213`
-
-**Current State:** Returns hardcoded static data with all zeros
-
-**What Needs to be Implemented:**
-- Query database for actual queue statistics
-- Calculate pending_jobs, active_jobs, completed_jobs, failed_jobs per queue
-
-**Endpoint:** GET /status
-
-**Current Return:**
-```rust
-QueueStatus {
-    queue_name: "fast" | "bulk",
-    pending_jobs: 0,  // hardcoded
-    active_jobs: 0,   // hardcoded
-    completed_jobs: 0, // hardcoded
-    failed_jobs: 0,   // hardcoded
-}
-```
-
-### 5. Admin API: list_queues()
-**Location:** `src/admin.rs:321-346`
-
-**Current State:** Returns hardcoded list of "fast" and "bulk" queues with zero counts
-
-**What Needs to be Implemented:**
-- Query database for actual queue list (dynamic queue discovery)
-- Get real statistics for each queue
-- Consider custom queues beyond just "fast" and "bulk"
-
-**Endpoint:** GET /queues
-
-### 6. Admin API: queue_stats()
-**Location:** `src/admin.rs:349-368`
-
-**Current State:** Returns hardcoded zeros for all metrics
-
-**What Needs to be Implemented:**
-- Query database for specific queue statistics
-- Return actual counts for pending/active/completed/failed jobs
-
-**Endpoint:** GET /queues/:queue_name/stats
-
-### 7. Admin API: dlq_cleanup()
+### 4. Admin API: dlq_cleanup()
 **Location:** `src/admin.rs:545-562`
 
 **Current State:** Returns HTTP 501 NOT_IMPLEMENTED
@@ -204,7 +159,7 @@ pub(crate) struct JobHandlerConfig {
 - WorkerRunner::process_available_jobs() - batch processing use case
 
 **Medium Priority (admin API features):**
-- 6 admin endpoints returning stub/static data
+- 3 admin endpoints returning stub/static data
 - All feature-gated, so not blocking main library use
 
 **Low Priority (workarounds exist):**
@@ -212,4 +167,4 @@ pub(crate) struct JobHandlerConfig {
 - 2 documentation TODOs
 - 1 dead code cleanup
 
-**Total Items:** 11
+**Total Items:** 8
