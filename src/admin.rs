@@ -255,6 +255,75 @@ impl ErrorResponse {
     }
 }
 
+/// DLQ cleanup request
+#[derive(Deserialize)]
+pub struct DlqCleanupRequest {
+    pub older_than_days: Option<i64>,
+    pub task_identifier: Option<String>,
+    pub queue_name: Option<String>,
+    pub max_jobs: Option<i32>,
+    pub dry_run: Option<bool>,
+}
+
+/// DLQ cleanup response
+#[derive(Serialize)]
+pub struct DlqCleanupResponse {
+    pub deleted_count: u32,
+    pub dry_run: bool,
+    pub cutoff_date: chrono::DateTime<chrono::Utc>,
+    pub affected_tasks: Vec<String>,
+}
+
+/// DLQ batch requeue request
+#[derive(Deserialize)]
+pub struct DlqBatchRequeueRequest {
+    pub task_identifier: Option<String>,
+    pub queue_name: Option<String>,
+    pub failed_after: Option<chrono::DateTime<chrono::Utc>>,
+    pub failed_before: Option<chrono::DateTime<chrono::Utc>>,
+    pub notes: Option<String>,
+    pub max_jobs: Option<i32>,
+    pub dry_run: Option<bool>,
+    pub throttle_ms: Option<u64>,
+}
+
+/// Batch operation error details
+#[derive(Serialize)]
+pub struct BatchOperationError {
+    pub dlq_id: i64,
+    pub task_identifier: String,
+    pub error: String,
+}
+
+/// DLQ batch requeue response
+#[derive(Serialize)]
+pub struct DlqBatchRequeueResponse {
+    pub requeued_count: u32,
+    pub failed_count: u32,
+    pub dry_run: bool,
+    pub affected_tasks: Vec<String>,
+    pub errors: Vec<BatchOperationError>,
+}
+
+/// DLQ batch delete request
+#[derive(Deserialize)]
+pub struct DlqBatchDeleteRequest {
+    pub task_identifier: Option<String>,
+    pub queue_name: Option<String>,
+    pub failed_after: Option<chrono::DateTime<chrono::Utc>>,
+    pub failed_before: Option<chrono::DateTime<chrono::Utc>>,
+    pub max_jobs: Option<i32>,
+    pub dry_run: Option<bool>,
+}
+
+/// DLQ batch delete response
+#[derive(Serialize)]
+pub struct DlqBatchDeleteResponse {
+    pub deleted_count: u32,
+    pub dry_run: bool,
+    pub affected_tasks: Vec<String>,
+}
+
 /// Create the admin router that can be mounted in any Axum application
 ///
 /// This router provides comprehensive backfill management endpoints:
@@ -291,6 +360,8 @@ where
         .route("/dlq/:dlq_id", delete(delete_dlq_job::<S>))
         .route("/dlq/:dlq_id/requeue", post(requeue_dlq_job::<S>))
         .route("/dlq/cleanup", post(cleanup_dlq::<S>))
+        .route("/dlq/batch-requeue", post(batch_requeue_dlq_jobs::<S>))
+        .route("/dlq/batch-delete", post(batch_delete_dlq_jobs::<S>))
 }
 
 /// Health check endpoint - GET /health
@@ -690,17 +761,229 @@ where
 }
 
 /// Cleanup DLQ endpoint - POST /dlq/cleanup
-async fn cleanup_dlq<S>(State(state): State<S>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)>
+async fn cleanup_dlq<S>(
+    State(state): State<S>,
+    Json(req): Json<DlqCleanupRequest>,
+) -> Result<Json<DlqCleanupResponse>, (StatusCode, Json<ErrorResponse>)>
 where
     S: BackfillAdminState,
 {
-    let _client = state.backfill_client();
+    let client = state.backfill_client();
 
-    // This would implement batch cleanup of old DLQ jobs
-    // For now, return a placeholder
-    warn!("DLQ cleanup endpoint not yet implemented");
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResponse::new("DLQ cleanup not yet implemented", "NOT_IMPLEMENTED")),
-    ))
+    // Default to 90 days if not specified
+    let days = req.older_than_days.unwrap_or(90);
+    let cutoff_date = chrono::Utc::now() - chrono::Duration::days(days);
+    let max_jobs = req.max_jobs.unwrap_or(1000).min(10000);
+    let dry_run = req.dry_run.unwrap_or(false);
+
+    // Build filter for list query
+    let filter = DlqFilter {
+        task_identifier: req.task_identifier.clone(),
+        queue_name: req.queue_name.clone(),
+        failed_before: Some(cutoff_date),
+        limit: Some(max_jobs),
+        ..Default::default()
+    };
+
+    // Get jobs to delete
+    let jobs_to_delete = client.list_dlq_jobs(filter).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(format!("Failed to query DLQ: {}", e), "QUERY_ERROR")),
+        )
+    })?;
+
+    if dry_run {
+        let affected_tasks: Vec<String> = jobs_to_delete
+            .jobs
+            .iter()
+            .map(|j| j.task_identifier.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        return Ok(Json(DlqCleanupResponse {
+            deleted_count: jobs_to_delete.jobs.len() as u32,
+            dry_run: true,
+            cutoff_date,
+            affected_tasks,
+        }));
+    }
+
+    // Delete jobs
+    let mut deleted_count = 0;
+    let mut affected_tasks = std::collections::HashSet::new();
+
+    for job in &jobs_to_delete.jobs {
+        if client.delete_dlq_job(job.id).await.unwrap_or(false) {
+            deleted_count += 1;
+            affected_tasks.insert(job.task_identifier.clone());
+        }
+    }
+
+    info!("DLQ cleanup completed: deleted {} jobs", deleted_count);
+
+    Ok(Json(DlqCleanupResponse {
+        deleted_count,
+        dry_run: false,
+        cutoff_date,
+        affected_tasks: affected_tasks.into_iter().collect(),
+    }))
+}
+
+/// Batch requeue DLQ jobs endpoint - POST /dlq/batch-requeue
+async fn batch_requeue_dlq_jobs<S>(
+    State(state): State<S>,
+    Json(req): Json<DlqBatchRequeueRequest>,
+) -> Result<Json<DlqBatchRequeueResponse>, (StatusCode, Json<ErrorResponse>)>
+where
+    S: BackfillAdminState,
+{
+    let client = state.backfill_client();
+    let max_jobs = req.max_jobs.unwrap_or(100).min(1000);
+    let dry_run = req.dry_run.unwrap_or(false);
+    let throttle_ms = req.throttle_ms.unwrap_or(50).min(5000);
+
+    // Build filter
+    let filter = DlqFilter {
+        task_identifier: req.task_identifier.clone(),
+        queue_name: req.queue_name.clone(),
+        failed_after: req.failed_after,
+        failed_before: req.failed_before,
+        limit: Some(max_jobs),
+        ..Default::default()
+    };
+
+    // Get jobs to requeue
+    let jobs_to_requeue = client.list_dlq_jobs(filter).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(format!("Failed to query DLQ: {}", e), "QUERY_ERROR")),
+        )
+    })?;
+
+    if dry_run {
+        let affected_tasks: Vec<String> = jobs_to_requeue
+            .jobs
+            .iter()
+            .map(|j| j.task_identifier.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        return Ok(Json(DlqBatchRequeueResponse {
+            requeued_count: jobs_to_requeue.jobs.len() as u32,
+            failed_count: 0,
+            dry_run: true,
+            affected_tasks,
+            errors: vec![],
+        }));
+    }
+
+    // Requeue jobs with throttling
+    let mut requeued_count = 0;
+    let mut failed_count = 0;
+    let mut errors = Vec::new();
+    let mut affected_tasks = std::collections::HashSet::new();
+
+    for job in &jobs_to_requeue.jobs {
+        match client.requeue_dlq_job(job.id, req.notes.clone()).await {
+            Ok(_) => {
+                requeued_count += 1;
+                affected_tasks.insert(job.task_identifier.clone());
+
+                // Throttle to avoid overwhelming the queue
+                if throttle_ms > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(throttle_ms)).await;
+                }
+            }
+            Err(e) => {
+                failed_count += 1;
+                errors.push(BatchOperationError {
+                    dlq_id: job.id,
+                    task_identifier: job.task_identifier.clone(),
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
+    info!(
+        "DLQ batch requeue completed: {} succeeded, {} failed",
+        requeued_count, failed_count
+    );
+
+    Ok(Json(DlqBatchRequeueResponse {
+        requeued_count,
+        failed_count,
+        dry_run: false,
+        affected_tasks: affected_tasks.into_iter().collect(),
+        errors,
+    }))
+}
+
+/// Batch delete DLQ jobs endpoint - POST /dlq/batch-delete
+async fn batch_delete_dlq_jobs<S>(
+    State(state): State<S>,
+    Json(req): Json<DlqBatchDeleteRequest>,
+) -> Result<Json<DlqBatchDeleteResponse>, (StatusCode, Json<ErrorResponse>)>
+where
+    S: BackfillAdminState,
+{
+    let client = state.backfill_client();
+    let max_jobs = req.max_jobs.unwrap_or(100).min(1000);
+    let dry_run = req.dry_run.unwrap_or(false);
+
+    // Build filter
+    let filter = DlqFilter {
+        task_identifier: req.task_identifier.clone(),
+        queue_name: req.queue_name.clone(),
+        failed_after: req.failed_after,
+        failed_before: req.failed_before,
+        limit: Some(max_jobs),
+        ..Default::default()
+    };
+
+    // Get jobs to delete
+    let jobs_to_delete = client.list_dlq_jobs(filter).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(format!("Failed to query DLQ: {}", e), "QUERY_ERROR")),
+        )
+    })?;
+
+    if dry_run {
+        let affected_tasks: Vec<String> = jobs_to_delete
+            .jobs
+            .iter()
+            .map(|j| j.task_identifier.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        return Ok(Json(DlqBatchDeleteResponse {
+            deleted_count: jobs_to_delete.jobs.len() as u32,
+            dry_run: true,
+            affected_tasks,
+        }));
+    }
+
+    // Delete jobs
+    let mut deleted_count = 0;
+    let mut affected_tasks = std::collections::HashSet::new();
+
+    for job in &jobs_to_delete.jobs {
+        if client.delete_dlq_job(job.id).await.unwrap_or(false) {
+            deleted_count += 1;
+            affected_tasks.insert(job.task_identifier.clone());
+        }
+    }
+
+    info!("DLQ batch delete completed: deleted {} jobs", deleted_count);
+
+    Ok(Json(DlqBatchDeleteResponse {
+        deleted_count,
+        dry_run: false,
+        affected_tasks: affected_tasks.into_iter().collect(),
+    }))
 }

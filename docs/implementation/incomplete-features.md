@@ -61,20 +61,6 @@ These are all feature-gated behind the `axum` feature flag.
 
 **Notes:** May need to research GraphileWorker's cancellation mechanism
 
-### 4. Admin API: dlq_cleanup()
-**Location:** `src/admin.rs:545-562`
-
-**Current State:** Returns HTTP 501 NOT_IMPLEMENTED
-
-**What Needs to be Implemented:**
-- Batch cleanup of old DLQ jobs
-- Parameters for cleanup criteria (age, status, task type, etc.)
-- Return count of cleaned up jobs
-
-**Endpoint:** POST /dlq/cleanup
-
-**Notes:** Should probably accept query parameters or JSON body to specify cleanup criteria
-
 ---
 
 ## Low Priority - Known Limitations/Workarounds
@@ -159,7 +145,7 @@ pub(crate) struct JobHandlerConfig {
 - WorkerRunner::process_available_jobs() - batch processing use case
 
 **Medium Priority (admin API features):**
-- 3 admin endpoints returning stub/static data
+- 2 admin endpoints returning stub/static data
 - All feature-gated, so not blocking main library use
 
 **Low Priority (workarounds exist):**
@@ -167,4 +153,4 @@ pub(crate) struct JobHandlerConfig {
 - 2 documentation TODOs
 - 1 dead code cleanup
 
-**Total Items:** 8
+**Total Items:** 7
