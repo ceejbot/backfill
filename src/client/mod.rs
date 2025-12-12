@@ -8,8 +8,9 @@ pub use dlq::*;
 /// High-level client for the backfill job queue system.
 #[derive(Clone)]
 pub struct BackfillClient {
-    /// a psql connection pool
+    /// PostgreSQL connection pool
     pool: sqlx::PgPool,
-    /// TODO document
+    /// The PostgreSQL schema name where GraphileWorker tables reside.
+    /// Defaults to "graphile_worker". Configurable via `new_with_schema()`.
     schema: String,
 }

@@ -244,10 +244,7 @@ impl BackfillClient {
 
         // Get total count for pagination (simplified - could be optimized)
         let count_query = format!("SELECT COUNT(*) FROM {}.backfill_dlq", self.schema);
-        let total: i64 = sqlx::query_scalar(&count_query)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or(0);
+        let total: i64 = sqlx::query_scalar(&count_query).fetch_one(&self.pool).await?;
 
         Ok(DlqJobList {
             jobs,

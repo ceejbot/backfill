@@ -17,19 +17,7 @@ This document tracks partially-implemented features and known limitations in the
 
 ## High Priority - Core Library Features
 
-### 1. WorkerRunner::process_available_jobs()
-**Location:** `src/worker.rs:467-478`
-
-**Current State:** Stub implementation that returns 0 without doing anything
-
-**What Needs to be Implemented:**
-- Query the job count from the database
-- Process available jobs without starting persistent polling loop
-- Return actual count of jobs processed
-
-**Intended Use Case:** Batch processing or testing scenarios where you want to process the current job queue without running a persistent worker
-
-**Current Workaround:** Documentation suggests using `run_until_cancelled` with a short timeout instead
+✅ **No high-priority incomplete items** - Core library features are complete.
 
 ---
 
@@ -142,7 +130,7 @@ pub(crate) struct JobHandlerConfig {
 ## Summary by Priority
 
 **High Priority (blocks core functionality):**
-- WorkerRunner::process_available_jobs() - batch processing use case
+- None - all core features complete ✅
 
 **Medium Priority (admin API features):**
 - 2 admin endpoints returning stub/static data
@@ -150,7 +138,7 @@ pub(crate) struct JobHandlerConfig {
 
 **Low Priority (workarounds exist):**
 - 1 known limitation with acceptable workaround
-- 2 documentation TODOs
+- 1 documentation TODO
 - 1 dead code cleanup
 
-**Total Items:** 7
+**Total Items:** 4

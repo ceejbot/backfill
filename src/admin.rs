@@ -198,7 +198,12 @@ async fn get_all_queue_names(pool: &sqlx::PgPool, schema: &str) -> Result<Vec<St
     let has_default_jobs = sqlx::query_scalar::<_, bool>(&has_default_jobs_query)
         .fetch_one(pool)
         .await
-        .unwrap_or(false);
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to check for default queue jobs: {}", e),
+            )
+        })?;
 
     let mut all_queues = queue_names;
     if has_default_jobs && !all_queues.contains(&"default".to_string()) {
@@ -348,17 +353,17 @@ where
         .route("/status", get(system_status::<S>))
         // Job management endpoints
         .route("/jobs", post(enqueue_job::<S>))
-        .route("/jobs/:job_id", get(get_job::<S>))
-        .route("/jobs/:job_id/cancel", delete(cancel_job::<S>))
+        .route("/jobs/{job_id}", get(get_job::<S>))
+        .route("/jobs/{job_id}/cancel", delete(cancel_job::<S>))
         // Queue management endpoints
         .route("/queues", get(list_queues::<S>))
-        .route("/queues/:queue_name/stats", get(queue_stats::<S>))
+        .route("/queues/{queue_name}/stats", get(queue_stats::<S>))
         // Dead Letter Queue management
         .route("/dlq", get(list_dlq_jobs::<S>))
         .route("/dlq/stats", get(dlq_stats::<S>))
-        .route("/dlq/:dlq_id", get(get_dlq_job::<S>))
-        .route("/dlq/:dlq_id", delete(delete_dlq_job::<S>))
-        .route("/dlq/:dlq_id/requeue", post(requeue_dlq_job::<S>))
+        .route("/dlq/{dlq_id}", get(get_dlq_job::<S>))
+        .route("/dlq/{dlq_id}", delete(delete_dlq_job::<S>))
+        .route("/dlq/{dlq_id}/requeue", post(requeue_dlq_job::<S>))
         .route("/dlq/cleanup", post(cleanup_dlq::<S>))
         .route("/dlq/batch-requeue", post(batch_requeue_dlq_jobs::<S>))
         .route("/dlq/batch-delete", post(batch_delete_dlq_jobs::<S>))
