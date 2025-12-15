@@ -92,13 +92,15 @@
 //! }
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::{BackfillClient, BackfillError, TaskHandler, WorkerOptions};
+use crate::{BackfillClient, BackfillError, LifecycleHooks, TaskHandler, WorkerOptions};
 
+// Re-export for use in wrapper
 /// Configuration for a worker queue
 #[derive(Debug, Clone)]
 pub struct QueueConfig {
@@ -372,6 +374,7 @@ pub struct WorkerRunner {
     config: WorkerConfig,
     client: BackfillClient,
     worker_options_builder: WorkerOptionsBuilder,
+    plugin_appliers: Vec<PluginApplier>,
 }
 
 impl WorkerRunner {
@@ -387,6 +390,7 @@ impl WorkerRunner {
     async fn from_builder(
         config: WorkerConfig,
         worker_options_builder: WorkerOptionsBuilder,
+        plugin_appliers: Vec<PluginApplier>,
     ) -> Result<Self, BackfillError> {
         // Create the client
         let client = if config.schema == "graphile_worker" {
@@ -404,12 +408,19 @@ impl WorkerRunner {
             config,
             client,
             worker_options_builder,
+            plugin_appliers,
         })
     }
 
     /// Create a worker instance from the stored configuration
     async fn create_worker(&self) -> Result<graphile_worker::Worker, BackfillError> {
-        let worker_options: WorkerOptions = self.worker_options_builder.clone().into();
+        let mut worker_options: WorkerOptions = self.worker_options_builder.clone().into();
+
+        // Apply all plugins
+        for applier in &self.plugin_appliers {
+            worker_options = applier(worker_options);
+        }
+
         worker_options
             .init()
             .await
@@ -417,10 +428,14 @@ impl WorkerRunner {
     }
 }
 
-/// Builder for WorkerRunner that allows configuring job types
+/// Type-erased plugin applier that can be cloned
+type PluginApplier = Arc<dyn Fn(WorkerOptions) -> WorkerOptions + Send + Sync>;
+
+/// Builder for WorkerRunner that allows configuring job types and plugins
 pub struct WorkerRunnerBuilder {
     config: WorkerConfig,
     worker_options_builder: WorkerOptionsBuilder,
+    plugin_appliers: Vec<PluginApplier>,
 }
 
 impl WorkerRunnerBuilder {
@@ -430,6 +445,7 @@ impl WorkerRunnerBuilder {
         Ok(Self {
             config,
             worker_options_builder,
+            plugin_appliers: Vec::new(),
         })
     }
 
@@ -478,9 +494,47 @@ impl WorkerRunnerBuilder {
         Ok(self)
     }
 
+    /// Add a lifecycle hook plugin
+    ///
+    /// Plugins receive callbacks for worker and job lifecycle events.
+    /// Multiple plugins can be registered and will be called in registration
+    /// order.
+    ///
+    /// # Requirements
+    /// The plugin must implement `Clone` to support worker cloning for
+    /// background tasks.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use backfill::{WorkerRunner, WorkerConfig, LifecycleHooks, JobCompleteContext};
+    ///
+    /// #[derive(Clone)]
+    /// struct MyPlugin;
+    ///
+    /// impl LifecycleHooks for MyPlugin {
+    ///     async fn on_job_complete(&self, ctx: JobCompleteContext) {
+    ///         println!("Job {} completed in {:?}", ctx.job.task_identifier(), ctx.duration);
+    ///     }
+    /// }
+    ///
+    /// # async fn example() -> Result<(), backfill::BackfillError> {
+    /// # let config = WorkerConfig::default();
+    /// let worker = WorkerRunner::builder(config).await?
+    ///     .add_plugin(MyPlugin)
+    ///     .build().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_plugin<H: LifecycleHooks + Clone + 'static>(mut self, plugin: H) -> Self {
+        // Store a closure that captures the plugin and applies it to WorkerOptions
+        let applier = Arc::new(move |opts: WorkerOptions| opts.add_plugin(plugin.clone()));
+        self.plugin_appliers.push(applier);
+        self
+    }
+
     /// Build the final WorkerRunner
     pub async fn build(self) -> Result<WorkerRunner, BackfillError> {
-        WorkerRunner::from_builder(self.config, self.worker_options_builder).await
+        WorkerRunner::from_builder(self.config, self.worker_options_builder, self.plugin_appliers).await
     }
 }
 
@@ -573,6 +627,7 @@ impl WorkerRunner {
             config: self.config.clone(),
             client: self.client.clone(),
             worker_options_builder: self.worker_options_builder.clone(),
+            plugin_appliers: self.plugin_appliers.clone(),
         };
 
         tokio::spawn(async move { runner.run_until_cancelled(cancellation_token).await })

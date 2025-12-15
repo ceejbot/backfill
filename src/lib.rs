@@ -60,9 +60,34 @@
 //! ```
 
 use chrono::{DateTime, Utc};
+// Lifecycle hooks for plugins
+pub use graphile_worker::{
+    AfterJobRunContext,
+    BeforeJobRunContext,
+    BeforeJobScheduleContext,
+    CronJobScheduledContext,
+    CronTickContext,
+    // Result types
+    HookResult,
+    // Job type for accessing job data
+    Job,
+    JobCompleteContext,
+    JobFailContext,
+    JobFetchContext,
+    JobPermanentlyFailContext,
+    JobScheduleResult,
+    JobStartContext,
+    // Trait
+    LifecycleHooks,
+    ShutdownReason,
+    // Context types
+    WorkerInitContext,
+    WorkerShutdownContext,
+    WorkerStartContext,
+};
 // Re-export commonly used types from graphile_worker
 pub use graphile_worker::{IntoTaskHandlerResult, JobKeyMode, TaskHandler, WorkerContext, WorkerOptions};
-use graphile_worker::{Job, JobSpec as GraphileJobSpec, JobSpecBuilder};
+use graphile_worker::{JobSpec as GraphileJobSpec, JobSpecBuilder};
 // Re-export crontab parsing types for advanced usage
 pub use graphile_worker_crontab_parser::{CrontabParseError, parse_crontab};
 use serde::Serialize;

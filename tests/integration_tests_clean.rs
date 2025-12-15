@@ -80,7 +80,7 @@ async fn test_basic_job_enqueue() -> Result<()> {
 
         // Test basic enqueueing
         let outcome = client.enqueue("test_job", &test_job, JobSpec::default()).await?;
-        let job = outcome.unwrap();
+        let job = outcome.expect("outcome should contain a job");
 
         // Verify the job was inserted
         assert!(*job.id() > 0, "Job should have a valid ID");
@@ -342,7 +342,7 @@ async fn test_job_key_already_in_progress() -> Result<()> {
 
         // Should be enqueued
         assert!(outcome1.is_enqueued());
-        let _job = outcome1.unwrap();
+        let _job = outcome1.expect("outcome should contain a job");
 
         // Simulate the job being locked by a worker
         let pool = client.pool();

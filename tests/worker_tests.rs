@@ -210,7 +210,7 @@ async fn test_worker_runner_client_access() -> Result<(), BackfillError> {
     };
 
     let outcome = client.enqueue("simple_test_job", &test_job, Default::default()).await?;
-    let job = outcome.unwrap();
+    let job = outcome.expect("enqueuing a job should succeed");
 
     assert!(*job.id() > 0);
 
