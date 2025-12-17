@@ -166,6 +166,12 @@ impl BackfillClient {
                 "CREATE INDEX IF NOT EXISTS idx_backfill_dlq_job_key ON {}.backfill_dlq (job_key) WHERE job_key IS NOT NULL",
                 self.schema
             ),
+            // Unique constraint on job_key for UPSERT support - prevents duplicate DLQ entries
+            // when a requeued job fails again. Only applies to non-NULL job_keys.
+            format!(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_backfill_dlq_job_key_unique ON {}.backfill_dlq (job_key) WHERE job_key IS NOT NULL",
+                self.schema
+            ),
         ];
 
         for index_query in indexes {
@@ -477,19 +483,30 @@ impl BackfillClient {
             "default".to_string()
         };
 
-        let insert_query = format!(
+        // Use UPSERT to handle the case where a requeued job fails again.
+        // If a DLQ entry with the same job_key already exists, update it
+        // instead of creating a duplicate. This ensures one DLQ entry per
+        // logical job and keeps failed_at current for cooldown calculations.
+        let upsert_query = format!(
             r#"
             INSERT INTO {}.backfill_dlq (
                 original_job_id, task_identifier, payload, queue_name, priority,
                 job_key, max_attempts, failure_reason, failure_count, last_error,
                 original_created_at, original_run_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (job_key) WHERE job_key IS NOT NULL DO UPDATE SET
+                failed_at = NOW(),
+                failure_count = {schema}.backfill_dlq.failure_count + EXCLUDED.failure_count,
+                failure_reason = EXCLUDED.failure_reason,
+                last_error = EXCLUDED.last_error,
+                original_job_id = EXCLUDED.original_job_id
             RETURNING *
         "#,
-            self.schema
+            self.schema,
+            schema = self.schema
         );
 
-        let row = sqlx::query(&insert_query)
+        let row = sqlx::query(&upsert_query)
             .bind(original_job.id())
             .bind(original_job.task_identifier())
             .bind(original_job.payload())
@@ -588,21 +605,27 @@ impl BackfillClient {
             // Convert last_error from TEXT to JSONB for DLQ table
             let last_error_json = last_error.map(serde_json::Value::String);
 
-            // Move to DLQ
-            let insert_dlq_query = format!(
+            // Move to DLQ using UPSERT to handle requeued jobs that fail again
+            let upsert_dlq_query = format!(
                 r#"
-                INSERT INTO {}.backfill_dlq (
+                INSERT INTO {schema}.backfill_dlq (
                     original_job_id, task_identifier, payload, queue_name, priority,
                     job_key, max_attempts, failure_reason, failure_count, last_error,
                     original_created_at, original_run_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ON CONFLICT (job_key) WHERE job_key IS NOT NULL DO UPDATE SET
+                    failed_at = NOW(),
+                    failure_count = {schema}.backfill_dlq.failure_count + EXCLUDED.failure_count,
+                    failure_reason = EXCLUDED.failure_reason,
+                    last_error = EXCLUDED.last_error,
+                    original_job_id = EXCLUDED.original_job_id
             "#,
-                self.schema
+                schema = self.schema
             );
 
             let failure_reason = format!("Job exceeded maximum retry attempts ({}/{})", attempts, max_attempts);
 
-            let insert_result = sqlx::query(&insert_dlq_query)
+            let upsert_result = sqlx::query(&upsert_dlq_query)
                 .bind(job_id)
                 .bind(&task_identifier)
                 .bind(&payload)
@@ -618,7 +641,7 @@ impl BackfillClient {
                 .execute(&self.pool)
                 .await;
 
-            match insert_result {
+            match upsert_result {
                 Ok(_) => {
                     // Successfully moved to DLQ, now remove from main jobs table
                     let delete_query = format!("DELETE FROM {}._private_jobs WHERE id = $1", self.schema);

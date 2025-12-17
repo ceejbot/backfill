@@ -554,6 +554,11 @@ impl WorkerRunner {
             self.config.dlq_processor_interval.is_some()
         );
 
+        // Run startup cleanup to release stale locks and clean up failed jobs
+        if let Err(e) = self.client.startup_cleanup().await {
+            log::warn!("Startup cleanup failed (continuing anyway): {}", e);
+        }
+
         // Record worker starting (increment active worker count)
         crate::metrics::update_worker_active("worker", 1);
 
