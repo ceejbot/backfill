@@ -399,6 +399,31 @@ impl BackfillClient {
         Ok(deleted)
     }
 
+    /// Delete DLQ entries by job_key.
+    ///
+    /// This is called when a job with a job_key completes successfully to clean
+    /// up any associated DLQ entries. This prevents requeued jobs from being
+    /// requeued again after they succeed.
+    ///
+    /// Returns the number of entries deleted.
+    pub async fn delete_dlq_by_job_key(&self, job_key: &str) -> Result<u64, BackfillError> {
+        let query = format!("DELETE FROM {}.backfill_dlq WHERE job_key = $1", self.schema);
+        let result = sqlx::query(&query).bind(job_key).execute(&self.pool).await?;
+
+        let deleted = result.rows_affected();
+
+        if deleted > 0 {
+            crate::metrics::record_dlq_job_deleted("(by_job_key)");
+            log::info!(
+                "DLQ entries deleted by job_key (job_key: {}, count: {})",
+                job_key,
+                deleted
+            );
+        }
+
+        Ok(deleted)
+    }
+
     /// Get DLQ statistics for monitoring and dashboards.
     pub async fn dlq_stats(&self) -> Result<DlqStats, BackfillError> {
         let query = format!(

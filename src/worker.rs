@@ -421,6 +421,13 @@ impl WorkerRunner {
             worker_options = applier(worker_options);
         }
 
+        // If DLQ is enabled, add the cleanup plugin that removes DLQ entries
+        // when jobs with matching job_keys complete successfully
+        if self.config.dlq_processor_interval.is_some() {
+            let cleanup_plugin = crate::DlqCleanupPlugin::new(self.client.clone());
+            worker_options = worker_options.add_plugin(cleanup_plugin);
+        }
+
         worker_options
             .init()
             .await
