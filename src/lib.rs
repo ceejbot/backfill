@@ -93,6 +93,7 @@ pub use graphile_worker_crontab_parser::{CrontabParseError, parse_crontab};
 use serde::Serialize;
 
 mod client;
+mod dlq_cleanup_plugin;
 mod errors;
 mod priorities;
 mod retries;
@@ -104,6 +105,7 @@ pub mod admin;
 pub mod metrics;
 
 pub use client::*;
+pub use dlq_cleanup_plugin::DlqCleanupPlugin;
 pub use errors::{BackfillError, WorkerError};
 pub use priorities::*;
 pub use retries::*;
