@@ -154,16 +154,36 @@ pub struct WorkerConfig {
     pub poll_interval: Duration,
     /// How often to process failed jobs into DLQ (None to disable)
     pub dlq_processor_interval: Option<Duration>,
+    /// How often to clean up stale locks (None to disable periodic cleanup).
+    /// When enabled, cleanup runs at this interval in addition to startup.
+    /// Default: 60 seconds
+    pub stale_lock_cleanup_interval: Option<Duration>,
+    /// How old a queue lock must be to be considered stale.
+    /// Queue locks are normally held for milliseconds during job selection.
+    /// Default: 5 minutes (very conservative)
+    pub stale_queue_lock_timeout: Duration,
+    /// How old a job lock must be to be considered stale.
+    /// Job locks are held while jobs execute, so this should be longer
+    /// than your longest-running job.
+    /// Default: 30 minutes
+    pub stale_job_lock_timeout: Duration,
 }
 
 impl Default for WorkerConfig {
     fn default() -> Self {
+        use crate::client::cleanup::{
+            DEFAULT_STALE_JOB_LOCK_TIMEOUT, DEFAULT_STALE_LOCK_CLEANUP_INTERVAL, DEFAULT_STALE_QUEUE_LOCK_TIMEOUT,
+        };
+
         Self {
             database_url: "postgresql://localhost:5432/backfill".to_string(),
             schema: "graphile_worker".to_string(),
             queue_configs: vec![QueueConfig::default_queue(10)],
             poll_interval: Duration::from_millis(200),
             dlq_processor_interval: Some(Duration::from_secs(60)),
+            stale_lock_cleanup_interval: Some(DEFAULT_STALE_LOCK_CLEANUP_INTERVAL),
+            stale_queue_lock_timeout: DEFAULT_STALE_QUEUE_LOCK_TIMEOUT,
+            stale_job_lock_timeout: DEFAULT_STALE_JOB_LOCK_TIMEOUT,
         }
     }
 }
@@ -198,6 +218,83 @@ impl WorkerConfig {
     /// Set DLQ processor interval (or disable with None)
     pub fn with_dlq_processor_interval(mut self, interval: Option<Duration>) -> Self {
         self.dlq_processor_interval = interval;
+        self
+    }
+
+    /// Set the interval for periodic stale lock cleanup.
+    ///
+    /// When enabled, the worker will periodically scan for and release stale
+    /// locks that may have been left behind by crashed workers.
+    ///
+    /// Pass `None` to disable periodic cleanup (cleanup will still run at
+    /// startup).
+    ///
+    /// Default: 60 seconds
+    pub fn with_stale_lock_cleanup_interval(mut self, interval: Option<Duration>) -> Self {
+        self.stale_lock_cleanup_interval = interval;
+        self
+    }
+
+    /// Set the timeout for considering queue locks stale.
+    ///
+    /// Queue locks are held briefly during job selection (typically
+    /// milliseconds). Any queue lock older than this timeout is considered
+    /// orphaned and will be released during cleanup.
+    ///
+    /// **Warning:** Setting this below 1 minute may interfere with normal
+    /// operations under high load.
+    ///
+    /// Default: 5 minutes
+    pub fn with_stale_queue_lock_timeout(mut self, timeout: Duration) -> Self {
+        const MIN_RECOMMENDED: Duration = Duration::from_secs(60);
+        if timeout < MIN_RECOMMENDED {
+            log::warn!(
+                "stale_queue_lock_timeout ({:?}) is below recommended minimum ({:?}). \
+                 Queue locks are normally held for milliseconds, but very short timeouts \
+                 may interfere with slow job selection under high load.",
+                timeout,
+                MIN_RECOMMENDED
+            );
+        }
+        self.stale_queue_lock_timeout = timeout;
+        self
+    }
+
+    /// Set the timeout for considering job locks stale.
+    ///
+    /// Job locks are held while jobs are being processed. This timeout should
+    /// be longer than your longest-running job to avoid prematurely releasing
+    /// locks on jobs that are still executing.
+    ///
+    /// **Warning:** Setting this too short can cause duplicate job execution
+    /// if jobs legitimately run longer than the timeout. This can lead to
+    /// data corruption or inconsistent state.
+    ///
+    /// Default: 30 minutes
+    pub fn with_stale_job_lock_timeout(mut self, timeout: Duration) -> Self {
+        const MIN_SAFE: Duration = Duration::from_secs(300); // 5 minutes
+        const MIN_RECOMMENDED: Duration = Duration::from_secs(900); // 15 minutes
+
+        if timeout < MIN_SAFE {
+            log::error!(
+                "DANGEROUS: stale_job_lock_timeout ({:?}) is below minimum safe threshold ({:?}). \
+                 Jobs running longer than this timeout will have their locks released, \
+                 causing DUPLICATE EXECUTION. This can corrupt data. \
+                 Consider using at least {:?}.",
+                timeout,
+                MIN_SAFE,
+                MIN_RECOMMENDED
+            );
+        } else if timeout < MIN_RECOMMENDED {
+            log::warn!(
+                "stale_job_lock_timeout ({:?}) is below recommended minimum ({:?}). \
+                 Ensure no jobs in your system can run longer than this duration, \
+                 or you risk duplicate execution.",
+                timeout,
+                MIN_RECOMMENDED
+            );
+        }
+        self.stale_job_lock_timeout = timeout;
         self
     }
 }
@@ -557,12 +654,17 @@ impl WorkerRunner {
     /// - The worker completes (unusual)
     pub async fn run_until_cancelled(&self, cancellation_token: CancellationToken) -> Result<(), BackfillError> {
         log::info!(
-            "Starting worker runner (dlq_enabled: {})",
-            self.config.dlq_processor_interval.is_some()
+            "Starting worker runner (dlq_enabled: {}, stale_lock_cleanup_enabled: {})",
+            self.config.dlq_processor_interval.is_some(),
+            self.config.stale_lock_cleanup_interval.is_some()
         );
 
-        // Run startup cleanup to release stale locks and clean up failed jobs
-        if let Err(e) = self.client.startup_cleanup().await {
+        // Run startup cleanup with configured timeouts
+        if let Err(e) = self
+            .client
+            .startup_cleanup_with_timeouts(self.config.stale_queue_lock_timeout, self.config.stale_job_lock_timeout)
+            .await
+        {
             log::warn!("Startup cleanup failed (continuing anyway): {}", e);
         }
 
@@ -573,6 +675,24 @@ impl WorkerRunner {
         let dlq_handle = if let Some(interval) = self.config.dlq_processor_interval {
             log::info!("Starting DLQ processor (interval_secs: {})", interval.as_secs());
             Some(self.client.start_dlq_processor(interval, cancellation_token.clone()))
+        } else {
+            None
+        };
+
+        // Start periodic stale lock cleanup if configured
+        let cleanup_handle = if let Some(interval) = self.config.stale_lock_cleanup_interval {
+            log::info!(
+                "Starting stale lock cleanup (interval: {}s, queue_timeout: {}s, job_timeout: {}s)",
+                interval.as_secs(),
+                self.config.stale_queue_lock_timeout.as_secs(),
+                self.config.stale_job_lock_timeout.as_secs()
+            );
+            Some(self.client.start_stale_lock_cleanup(
+                interval,
+                self.config.stale_queue_lock_timeout,
+                self.config.stale_job_lock_timeout,
+                cancellation_token.clone(),
+            ))
         } else {
             None
         };
@@ -618,6 +738,16 @@ impl WorkerRunner {
                 Ok(Ok(())) => log::info!("DLQ processor stopped gracefully"),
                 Ok(Err(e)) => log::warn!("DLQ processor stopped with error: {}", e),
                 Err(_) => log::warn!("DLQ processor shutdown timeout"),
+            }
+        }
+
+        // Wait for stale lock cleanup to stop
+        if let Some(cleanup_handle) = cleanup_handle {
+            log::info!("Waiting for stale lock cleanup task to stop");
+            match tokio::time::timeout(Duration::from_secs(5), cleanup_handle).await {
+                Ok(Ok(())) => log::info!("Stale lock cleanup stopped gracefully"),
+                Ok(Err(e)) => log::warn!("Stale lock cleanup stopped with error: {}", e),
+                Err(_) => log::warn!("Stale lock cleanup shutdown timeout"),
             }
         }
 
@@ -741,5 +871,43 @@ mod tests {
         assert_eq!(config.schema, "my_jobs");
         assert_eq!(config.poll_interval, Duration::from_millis(50));
         assert_eq!(config.dlq_processor_interval, None);
+    }
+
+    #[test]
+    fn test_worker_config_stale_lock_defaults() {
+        let config = WorkerConfig::default();
+
+        // Verify stale lock cleanup is enabled by default
+        assert!(config.stale_lock_cleanup_interval.is_some());
+        assert_eq!(config.stale_lock_cleanup_interval, Some(Duration::from_secs(60)));
+
+        // Verify default timeouts
+        assert_eq!(
+            config.stale_queue_lock_timeout,
+            Duration::from_secs(300) // 5 minutes
+        );
+        assert_eq!(
+            config.stale_job_lock_timeout,
+            Duration::from_secs(1800) // 30 minutes
+        );
+    }
+
+    #[test]
+    fn test_worker_config_stale_lock_builders() {
+        let config = WorkerConfig::new("postgresql://localhost/test")
+            .with_stale_lock_cleanup_interval(Some(Duration::from_secs(30)))
+            .with_stale_queue_lock_timeout(Duration::from_secs(120))
+            .with_stale_job_lock_timeout(Duration::from_secs(600));
+
+        assert_eq!(config.stale_lock_cleanup_interval, Some(Duration::from_secs(30)));
+        assert_eq!(config.stale_queue_lock_timeout, Duration::from_secs(120));
+        assert_eq!(config.stale_job_lock_timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_worker_config_disable_stale_lock_cleanup() {
+        let config = WorkerConfig::new("postgresql://localhost/test").with_stale_lock_cleanup_interval(None);
+
+        assert_eq!(config.stale_lock_cleanup_interval, None);
     }
 }

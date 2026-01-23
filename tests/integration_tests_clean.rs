@@ -497,6 +497,7 @@ async fn test_cron_schedule_registration() -> Result<()> {
         queue_configs: vec![],
         poll_interval: std::time::Duration::from_millis(1000),
         dlq_processor_interval: None,
+        ..Default::default()
     };
 
     // Build worker with cron schedule - should succeed
@@ -545,6 +546,7 @@ async fn test_multiple_cron_schedules() -> Result<()> {
         queue_configs: vec![],
         poll_interval: std::time::Duration::from_millis(1000),
         dlq_processor_interval: None,
+        ..Default::default()
     };
 
     // Build worker with multiple cron schedules - should succeed
@@ -583,6 +585,7 @@ async fn test_cron_with_payload() -> Result<()> {
         queue_configs: vec![],
         poll_interval: std::time::Duration::from_millis(1000),
         dlq_processor_interval: None,
+        ..Default::default()
     };
 
     // Build worker with cron schedule that includes payload - should succeed
@@ -605,4 +608,248 @@ async fn test_cron_with_payload() -> Result<()> {
     pool.close().await;
 
     Ok(())
+}
+
+// =============================================================================
+// Stale Lock Cleanup Tests
+// =============================================================================
+
+/// Test that release_stale_queue_locks actually releases old queue locks
+#[tokio::test]
+async fn test_release_stale_queue_locks() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // First, enqueue a job to ensure the queue exists
+        let test_job = TestJob {
+            message: "test".to_string(),
+            number: 1,
+        };
+        client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+
+        // Manually insert a stale queue lock (10 minutes old)
+        let stale_lock_query = format!(
+            r#"
+            INSERT INTO {schema}._private_job_queues (queue_name, locked_at, locked_by)
+            VALUES ('stale_test_queue', NOW() - INTERVAL '10 minutes', 'dead_worker_123')
+            ON CONFLICT (queue_name) DO UPDATE
+            SET locked_at = NOW() - INTERVAL '10 minutes', locked_by = 'dead_worker_123'
+            "#,
+            schema = schema
+        );
+        sqlx::query(&stale_lock_query).execute(pool).await?;
+
+        // Verify the lock exists
+        let count_before: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {schema}._private_job_queues WHERE locked_by = 'dead_worker_123'",
+            schema = schema
+        ))
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(count_before.0, 1, "Stale lock should exist before cleanup");
+
+        // Run cleanup with a 5-minute timeout (should release 10-minute-old lock)
+        let released = client
+            .release_stale_queue_locks(std::time::Duration::from_secs(300))
+            .await?;
+        assert_eq!(released, 1, "Should have released 1 stale queue lock");
+
+        // Verify the lock was released
+        let count_after: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {schema}._private_job_queues WHERE locked_by = 'dead_worker_123'",
+            schema = schema
+        ))
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(count_after.0, 0, "Stale lock should be released after cleanup");
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test that release_stale_job_locks actually releases old job locks
+#[tokio::test]
+async fn test_release_stale_job_locks() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue a job first
+        let test_job = TestJob {
+            message: "locked_job".to_string(),
+            number: 42,
+        };
+        let outcome = client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        let job = outcome.expect("should have enqueued job");
+        let job_id = *job.id();
+
+        // Manually set a stale lock on the job (15 minutes old)
+        let stale_lock_query = format!(
+            r#"
+            UPDATE {schema}._private_jobs
+            SET locked_at = NOW() - INTERVAL '15 minutes',
+                locked_by = 'dead_worker_456'
+            WHERE id = $1
+            "#,
+            schema = schema
+        );
+        sqlx::query(&stale_lock_query).bind(job_id).execute(pool).await?;
+
+        // Verify the lock exists
+        let locked_by: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
+            schema = schema
+        ))
+        .bind(job_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            locked_by,
+            Some("dead_worker_456".to_string()),
+            "Job should be locked before cleanup"
+        );
+
+        // Run cleanup with a 10-minute timeout (should release 15-minute-old lock)
+        let released = client
+            .release_stale_job_locks(std::time::Duration::from_secs(600))
+            .await?;
+        assert_eq!(released, 1, "Should have released 1 stale job lock");
+
+        // Verify the lock was released
+        let locked_by_after: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
+            schema = schema
+        ))
+        .bind(job_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(locked_by_after, None, "Job lock should be released after cleanup");
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test that recent locks are NOT released (safety check)
+#[tokio::test]
+async fn test_recent_locks_not_released() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue a job
+        let test_job = TestJob {
+            message: "recent_lock".to_string(),
+            number: 1,
+        };
+        let outcome = client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        let job = outcome.expect("should have enqueued job");
+        let job_id = *job.id();
+
+        // Set a recent lock (1 minute old - should NOT be released)
+        let recent_lock_query = format!(
+            r#"
+            UPDATE {schema}._private_jobs
+            SET locked_at = NOW() - INTERVAL '1 minute',
+                locked_by = 'active_worker'
+            WHERE id = $1
+            "#,
+            schema = schema
+        );
+        sqlx::query(&recent_lock_query).bind(job_id).execute(pool).await?;
+
+        // Run cleanup with a 30-minute timeout (should NOT release 1-minute-old lock)
+        let released = client
+            .release_stale_job_locks(std::time::Duration::from_secs(1800))
+            .await?;
+        assert_eq!(released, 0, "Should NOT have released recent lock");
+
+        // Verify the lock still exists
+        let locked_by: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
+            schema = schema
+        ))
+        .bind(job_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            locked_by,
+            Some("active_worker".to_string()),
+            "Recent lock should still exist"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test startup_cleanup releases both queue and job locks
+#[tokio::test]
+async fn test_startup_cleanup_releases_both_lock_types() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue a job
+        let test_job = TestJob {
+            message: "startup_test".to_string(),
+            number: 1,
+        };
+        let outcome = client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        let job = outcome.expect("should have enqueued job");
+        let job_id = *job.id();
+
+        // Create a stale queue lock
+        let stale_queue_lock = format!(
+            r#"
+            INSERT INTO {schema}._private_job_queues (queue_name, locked_at, locked_by)
+            VALUES ('startup_stale_queue', NOW() - INTERVAL '1 hour', 'crashed_worker')
+            ON CONFLICT (queue_name) DO UPDATE
+            SET locked_at = NOW() - INTERVAL '1 hour', locked_by = 'crashed_worker'
+            "#,
+            schema = schema
+        );
+        sqlx::query(&stale_queue_lock).execute(pool).await?;
+
+        // Create a stale job lock
+        let stale_job_lock = format!(
+            r#"
+            UPDATE {schema}._private_jobs
+            SET locked_at = NOW() - INTERVAL '1 hour',
+                locked_by = 'crashed_worker'
+            WHERE id = $1
+            "#,
+            schema = schema
+        );
+        sqlx::query(&stale_job_lock).bind(job_id).execute(pool).await?;
+
+        // Run startup cleanup
+        let (queue_released, job_released, _failed_deleted) = client.startup_cleanup().await?;
+
+        assert!(queue_released >= 1, "Should have released at least 1 stale queue lock");
+        assert_eq!(job_released, 1, "Should have released 1 stale job lock");
+
+        // Verify both locks were released
+        let queue_lock_count: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {schema}._private_job_queues WHERE locked_by = 'crashed_worker'",
+            schema = schema
+        ))
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(queue_lock_count.0, 0, "Queue lock should be released");
+
+        let job_locked_by: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
+            schema = schema
+        ))
+        .bind(job_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(job_locked_by, None, "Job lock should be released");
+
+        Ok(())
+    })
+    .await
 }

@@ -104,6 +104,9 @@ pub mod admin;
 
 pub mod metrics;
 
+pub use client::cleanup::{
+    DEFAULT_STALE_JOB_LOCK_TIMEOUT, DEFAULT_STALE_LOCK_CLEANUP_INTERVAL, DEFAULT_STALE_QUEUE_LOCK_TIMEOUT,
+};
 pub use client::*;
 pub use dlq_cleanup_plugin::DlqCleanupPlugin;
 pub use errors::{BackfillError, WorkerError};

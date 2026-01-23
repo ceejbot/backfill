@@ -350,6 +350,42 @@ Monitor worker pool health and utilization.
   - `result`: Poll result (jobs_found, empty, error)
 - **Use**: Monitor polling efficiency, detect issues
 
+### Cleanup Metrics
+
+Track stale lock cleanup operations. These are critical for detecting when cleanup isn't working properly.
+
+#### `backfill_cleanup_queue_locks_released`
+- **Type**: Counter
+- **Description**: Total number of stale queue locks released
+- **Labels**: None
+- **Use**: Monitor cleanup activity, detect stuck queues
+
+#### `backfill_cleanup_job_locks_released`
+- **Type**: Counter
+- **Description**: Total number of stale job locks released
+- **Labels**: None
+- **Use**: Monitor cleanup activity, detect crashed workers leaving orphaned jobs
+
+#### `backfill_cleanup_failed_jobs_deleted`
+- **Type**: Counter
+- **Description**: Total number of permanently failed jobs cleaned up from main queue
+- **Labels**: None
+- **Use**: Track cleanup of exhausted-retry jobs
+
+#### `backfill_cleanup_failures`
+- **Type**: Counter
+- **Description**: Cleanup operations that failed
+- **Labels**:
+  - `operation`: Which cleanup operation failed (queue_locks, job_locks)
+  - `error_type`: Error classification (timeout, network, etc.)
+- **Use**: Alert on cleanup failures
+
+#### `backfill_cleanup_last_success_timestamp`
+- **Type**: Gauge
+- **Description**: Unix timestamp of last successful cleanup run
+- **Labels**: None
+- **Use**: **Critical health signal** - alert if cleanup hasn't succeeded recently
+
 ### Retry Metrics
 
 Understand retry patterns and effectiveness.
@@ -511,6 +547,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   for: 5m
   severity: critical
   description: Job failure rate >10% for 5+ minutes
+
+# Cleanup not running (CRITICAL - can cause job lock buildup)
+- alert: CleanupNotRunning
+  expr: time() - backfill_cleanup_last_success_timestamp > 300
+  for: 5m
+  severity: critical
+  description: Stale lock cleanup hasn't succeeded in 5+ minutes
+
+# Cleanup releasing locks (indicates crashed workers)
+- alert: StaleLocksReleased
+  expr: increase(backfill_cleanup_job_locks_released[5m]) > 0
+  for: 0m
+  severity: warning
+  description: Cleanup released stale job locks - indicates worker crash
 ```
 
 ### Warning Alerts

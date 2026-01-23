@@ -25,6 +25,7 @@ Built on top of `graphile_worker` (v0.8.6), backfill adds these production-ready
 - 🏃 **Flexible Worker Patterns** - `WorkerRunner` supporting tokio::select!, background tasks, and one-shot processing
 - 🔧 **Admin API** - Optional Axum router for HTTP-based job management (experimental)
 - 📝 **Convenience Functions** - `enqueue_fast()`, `enqueue_bulk()`, `enqueue_critical()`, etc.
+- 🧹 **Stale Lock Cleanup** - Automatic cleanup of orphaned locks from crashed workers (startup + periodic)
 
 All built on graphile_worker's rock-solid foundation of PostgreSQL SKIP LOCKED and LISTEN/NOTIFY.
 
@@ -68,6 +69,45 @@ All configuration is passed in via environment variables:
 - `BULK_QUEUE_CONCURRENCY`: Workers for bulk processing (default: 5)
 - `POLL_INTERVAL_MS`: Job polling interval (default: 200ms)
 - `RUST_LOG`: Logging configuration
+
+### WorkerConfig Options
+
+When building a `WorkerRunner`, you can configure additional options:
+
+```rust
+use std::time::Duration;
+use backfill::{WorkerConfig, WorkerRunner};
+
+let config = WorkerConfig::new(&database_url)
+    .with_schema("graphile_worker")           // PostgreSQL schema (default)
+    .with_poll_interval(Duration::from_millis(200))  // Job polling interval
+    .with_dlq_processor_interval(Some(Duration::from_secs(60)))  // DLQ processing
+    // Stale lock cleanup configuration
+    .with_stale_lock_cleanup_interval(Some(Duration::from_secs(60)))  // Periodic cleanup
+    .with_stale_queue_lock_timeout(Duration::from_secs(300))   // 5 min (queue locks)
+    .with_stale_job_lock_timeout(Duration::from_secs(1800));   // 30 min (job locks)
+
+let worker = WorkerRunner::builder(config).await?
+    .define_job::<MyJob>()
+    .build().await?;
+```
+
+#### Stale Lock Cleanup
+
+When workers crash without graceful shutdown, they can leave locks behind that prevent jobs from being processed. Backfill automatically cleans these up:
+
+- **Startup cleanup**: Runs when the worker starts
+- **Periodic cleanup**: Runs every 60 seconds by default (configurable)
+
+**Configuration options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `stale_lock_cleanup_interval` | 60s | How often to check for stale locks. Set to `None` to disable periodic cleanup. |
+| `stale_queue_lock_timeout` | 5 min | Queue locks older than this are considered stale. Queue locks are normally held for milliseconds. |
+| `stale_job_lock_timeout` | 30 min | Job locks older than this are considered stale. **Set this longer than your longest-running job!** |
+
+**⚠️ Warning:** Setting `stale_job_lock_timeout` too short can cause duplicate job execution if jobs legitimately run longer than the timeout. This can lead to data corruption.
 
 ### SQLx Compile-Time Query Verification
 

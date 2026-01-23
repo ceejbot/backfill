@@ -170,6 +170,61 @@ pub(crate) fn record_db_operation_duration(operation: &str, duration_secs: f64) 
     .record(duration_secs);
 }
 
+// === Cleanup Metrics ===
+
+/// Record stale queue locks released during cleanup
+pub(crate) fn record_cleanup_queue_locks_released(count: u64) {
+    metrics::counter!("backfill_cleanup_queue_locks_released").increment(count);
+    if count > 0 {
+        metrics::gauge!("backfill_cleanup_queue_locks_last_released").set(count as f64);
+    }
+}
+
+/// Record stale job locks released during cleanup
+pub(crate) fn record_cleanup_job_locks_released(count: u64) {
+    metrics::counter!("backfill_cleanup_job_locks_released").increment(count);
+    if count > 0 {
+        metrics::gauge!("backfill_cleanup_job_locks_last_released").set(count as f64);
+    }
+}
+
+/// Record permanently failed jobs cleaned up
+pub(crate) fn record_cleanup_failed_jobs_deleted(count: u64) {
+    metrics::counter!("backfill_cleanup_failed_jobs_deleted").increment(count);
+}
+
+/// Record a cleanup operation failure
+pub(crate) fn record_cleanup_failure(operation: &str, error_type: &str) {
+    metrics::counter!(
+        "backfill_cleanup_failures",
+        "operation" => operation.to_string(),
+        "error_type" => error_type.to_string(),
+    )
+    .increment(1);
+}
+
+/// Update cleanup health timestamp (unix timestamp of last successful cleanup)
+pub(crate) fn update_cleanup_health_timestamp() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as f64;
+    metrics::gauge!("backfill_cleanup_last_success_timestamp").set(now);
+}
+
+/// Record the age of the oldest stale lock found (for alerting)
+///
+/// This is available for future use when we want to track how old the
+/// oldest stale lock is, which helps with alerting on cleanup effectiveness.
+#[allow(dead_code)]
+pub(crate) fn record_oldest_stale_lock_age(lock_type: &str, age_seconds: f64) {
+    metrics::gauge!(
+        "backfill_cleanup_oldest_stale_lock_age_seconds",
+        "lock_type" => lock_type.to_string(),
+    )
+    .set(age_seconds);
+}
+
 /// Classify an error for metrics labels
 ///
 /// Attempts to categorize errors into standard types for metrics.
@@ -233,5 +288,17 @@ mod tests {
 
         record_db_operation("enqueue", "success");
         record_db_operation_duration("enqueue", 0.05);
+    }
+
+    #[test]
+    fn test_cleanup_metrics_emission() {
+        // Verify cleanup metrics functions can be called
+        record_cleanup_queue_locks_released(5);
+        record_cleanup_job_locks_released(3);
+        record_cleanup_failed_jobs_deleted(1);
+        record_cleanup_failure("queue_locks", "timeout");
+        update_cleanup_health_timestamp();
+        record_oldest_stale_lock_age("queue", 120.5);
+        record_oldest_stale_lock_age("job", 300.0);
     }
 }

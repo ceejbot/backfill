@@ -118,6 +118,7 @@ impl From<ExampleWorkerConfig> for WorkerConfig {
             ],
             poll_interval: value.poll_interval,
             dlq_processor_interval: Some(value.dlq_processor_interval),
+            ..Default::default()
         }
     }
 }
