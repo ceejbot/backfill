@@ -98,7 +98,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::{BackfillClient, BackfillError, LifecycleHooks, TaskHandler, WorkerOptions};
+use crate::{BackfillClient, BackfillError, Plugin, TaskHandler, WorkerOptions};
 
 // Re-export for use in wrapper
 /// Configuration for a worker queue
@@ -604,20 +604,28 @@ impl WorkerRunnerBuilder {
     /// Multiple plugins can be registered and will be called in registration
     /// order.
     ///
+    /// # Plugin API
+    /// Plugins implement the `Plugin` trait which has a single `register`
+    /// method that receives a `HookRegistry`. Use `hooks.on(EventType,
+    /// handler)` to register handlers for specific events.
+    ///
     /// # Requirements
     /// The plugin must implement `Clone` to support worker cloning for
-    /// background tasks.
+    /// background tasks. Any state shared between handlers must be wrapped
+    /// in `Arc`.
     ///
     /// # Example
     /// ```rust,no_run
-    /// use backfill::{WorkerRunner, WorkerConfig, LifecycleHooks, JobCompleteContext};
+    /// use backfill::{WorkerRunner, WorkerConfig, Plugin, HookRegistry, JobComplete, JobCompleteContext};
     ///
     /// #[derive(Clone)]
     /// struct MyPlugin;
     ///
-    /// impl LifecycleHooks for MyPlugin {
-    ///     async fn on_job_complete(&self, ctx: JobCompleteContext) {
-    ///         println!("Job {} completed in {:?}", ctx.job.task_identifier(), ctx.duration);
+    /// impl Plugin for MyPlugin {
+    ///     fn register(self, hooks: &mut HookRegistry) {
+    ///         hooks.on(JobComplete, |ctx: JobCompleteContext| async move {
+    ///             println!("Job {} completed in {:?}", ctx.job.task_identifier(), ctx.duration);
+    ///         });
     ///     }
     /// }
     ///
@@ -629,7 +637,7 @@ impl WorkerRunnerBuilder {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn add_plugin<H: LifecycleHooks + Clone + 'static>(mut self, plugin: H) -> Self {
+    pub fn add_plugin<H: Plugin + Clone + 'static>(mut self, plugin: H) -> Self {
         // Store a closure that captures the plugin and applies it to WorkerOptions
         let applier = Arc::new(move |opts: WorkerOptions| opts.add_plugin(plugin.clone()));
         self.plugin_appliers.push(applier);

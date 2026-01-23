@@ -14,7 +14,7 @@ type Result<T> = std::result::Result<T, BackfillError>;
 
 /// Get test database URL from environment or use default
 fn get_test_database_url() -> String {
-    std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://ceej@localhost:5432/backfill_test".to_string())
+    std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://localhost:5432/backfill_test".to_string())
 }
 
 /// Ensure test database exists
@@ -143,29 +143,55 @@ impl CountingPlugin {
     }
 }
 
-impl LifecycleHooks for CountingPlugin {
-    async fn on_worker_start(&self, _ctx: WorkerStartContext) {
-        self.worker_starts.fetch_add(1, Ordering::SeqCst);
-    }
+impl Plugin for CountingPlugin {
+    fn register(self, hooks: &mut HookRegistry) {
+        let worker_starts = self.worker_starts.clone();
+        hooks.on(WorkerStart, move |_ctx: WorkerStartContext| {
+            let worker_starts = worker_starts.clone();
+            async move {
+                worker_starts.fetch_add(1, Ordering::SeqCst);
+            }
+        });
 
-    async fn on_worker_shutdown(&self, _ctx: WorkerShutdownContext) {
-        self.worker_shutdowns.fetch_add(1, Ordering::SeqCst);
-    }
+        let worker_shutdowns = self.worker_shutdowns.clone();
+        hooks.on(WorkerShutdown, move |_ctx: WorkerShutdownContext| {
+            let worker_shutdowns = worker_shutdowns.clone();
+            async move {
+                worker_shutdowns.fetch_add(1, Ordering::SeqCst);
+            }
+        });
 
-    async fn on_job_start(&self, _ctx: JobStartContext) {
-        self.job_starts.fetch_add(1, Ordering::SeqCst);
-    }
+        let job_starts = self.job_starts.clone();
+        hooks.on(JobStart, move |_ctx: JobStartContext| {
+            let job_starts = job_starts.clone();
+            async move {
+                job_starts.fetch_add(1, Ordering::SeqCst);
+            }
+        });
 
-    async fn on_job_complete(&self, _ctx: JobCompleteContext) {
-        self.job_completes.fetch_add(1, Ordering::SeqCst);
-    }
+        let job_completes = self.job_completes.clone();
+        hooks.on(JobComplete, move |_ctx: JobCompleteContext| {
+            let job_completes = job_completes.clone();
+            async move {
+                job_completes.fetch_add(1, Ordering::SeqCst);
+            }
+        });
 
-    async fn on_job_fail(&self, _ctx: JobFailContext) {
-        self.job_fails.fetch_add(1, Ordering::SeqCst);
-    }
+        let job_fails = self.job_fails.clone();
+        hooks.on(JobFail, move |_ctx: JobFailContext| {
+            let job_fails = job_fails.clone();
+            async move {
+                job_fails.fetch_add(1, Ordering::SeqCst);
+            }
+        });
 
-    async fn on_job_permanently_fail(&self, _ctx: JobPermanentlyFailContext) {
-        self.job_permanent_fails.fetch_add(1, Ordering::SeqCst);
+        let job_permanent_fails = self.job_permanent_fails.clone();
+        hooks.on(JobPermanentlyFail, move |_ctx: JobPermanentlyFailContext| {
+            let job_permanent_fails = job_permanent_fails.clone();
+            async move {
+                job_permanent_fails.fetch_add(1, Ordering::SeqCst);
+            }
+        });
     }
 }
 
@@ -221,9 +247,15 @@ async fn test_plugin_receives_job_complete_with_duration() -> Result<()> {
             duration_received: Arc<std::sync::Mutex<Option<Duration>>>,
         }
 
-        impl LifecycleHooks for DurationCheckPlugin {
-            async fn on_job_complete(&self, ctx: JobCompleteContext) {
-                *self.duration_received.lock().expect("lock should lock") = Some(ctx.duration);
+        impl Plugin for DurationCheckPlugin {
+            fn register(self, hooks: &mut HookRegistry) {
+                let duration_received = self.duration_received.clone();
+                hooks.on(JobComplete, move |ctx: JobCompleteContext| {
+                    let duration_received = duration_received.clone();
+                    async move {
+                        *duration_received.lock().expect("lock should lock") = Some(ctx.duration);
+                    }
+                });
             }
         }
 
@@ -278,12 +310,15 @@ async fn test_plugin_receives_will_retry_flag() -> Result<()> {
             will_retry_values: Arc<std::sync::Mutex<Vec<bool>>>,
         }
 
-        impl LifecycleHooks for RetryCheckPlugin {
-            async fn on_job_fail(&self, ctx: JobFailContext) {
-                self.will_retry_values
-                    .lock()
-                    .expect("lock should lock")
-                    .push(ctx.will_retry);
+        impl Plugin for RetryCheckPlugin {
+            fn register(self, hooks: &mut HookRegistry) {
+                let will_retry_values = self.will_retry_values.clone();
+                hooks.on(JobFail, move |ctx: JobFailContext| {
+                    let will_retry_values = will_retry_values.clone();
+                    async move {
+                        will_retry_values.lock().expect("lock should lock").push(ctx.will_retry);
+                    }
+                });
             }
         }
 
@@ -344,12 +379,17 @@ async fn test_multiple_plugins_called_in_order() -> Result<()> {
             call_order: Arc<std::sync::Mutex<Vec<String>>>,
         }
 
-        impl LifecycleHooks for OrderPlugin {
-            async fn on_job_start(&self, _ctx: JobStartContext) {
-                self.call_order
-                    .lock()
-                    .expect("lock should lock")
-                    .push(self.name.clone());
+        impl Plugin for OrderPlugin {
+            fn register(self, hooks: &mut HookRegistry) {
+                let name = self.name.clone();
+                let call_order = self.call_order.clone();
+                hooks.on(JobStart, move |_ctx: JobStartContext| {
+                    let name = name.clone();
+                    let call_order = call_order.clone();
+                    async move {
+                        call_order.lock().expect("lock should lock").push(name);
+                    }
+                });
             }
         }
 

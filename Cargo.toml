@@ -16,7 +16,7 @@ axum = ["dep:axum"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-graphile_worker = "0.9.2"
+graphile_worker = "0.11.1"
 graphile_worker_crontab_parser = "0.5.12"
 log = "0.4.28"
 metrics = "0.24"
@@ -32,6 +32,7 @@ uuid = { version = "1.0", features = ["v4", "v7", "serde"] }
 
 # Optional dependencies for admin API
 axum = { version = "0.8", optional = true }
+graphile_worker_lifecycle_hooks = "0.2.2"
 
 [dev-dependencies]
 env_logger = "0.11"

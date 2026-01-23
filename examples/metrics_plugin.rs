@@ -20,9 +20,10 @@
 use std::time::Duration;
 
 use backfill::{
-    BackfillClient, BackfillError, IntoTaskHandlerResult, JobCompleteContext, JobFailContext,
-    JobPermanentlyFailContext, JobStartContext, LifecycleHooks, TaskHandler, WorkerConfig, WorkerContext, WorkerRunner,
-    WorkerShutdownContext, WorkerStartContext, enqueue_fast,
+    BackfillClient, BackfillError, HookRegistry, IntoTaskHandlerResult, JobComplete, JobCompleteContext, JobFail,
+    JobFailContext, JobPermanentlyFail, JobPermanentlyFailContext, JobStart, JobStartContext, Plugin, TaskHandler,
+    WorkerConfig, WorkerContext, WorkerRunner, WorkerShutdown, WorkerShutdownContext, WorkerStart, WorkerStartContext,
+    enqueue_fast,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -37,95 +38,97 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 struct MetricsPlugin;
 
-impl LifecycleHooks for MetricsPlugin {
-    async fn on_worker_start(&self, ctx: WorkerStartContext) {
-        metrics::gauge!("backfill_worker_active").set(1.0);
-        log::info!("Worker {} started - metrics recording enabled", ctx.worker_id);
-    }
+impl Plugin for MetricsPlugin {
+    fn register(self, hooks: &mut HookRegistry) {
+        hooks.on(WorkerStart, |ctx: WorkerStartContext| async move {
+            metrics::gauge!("backfill_worker_active").set(1.0);
+            log::info!("Worker {} started - metrics recording enabled", ctx.worker_id);
+        });
 
-    async fn on_worker_shutdown(&self, ctx: WorkerShutdownContext) {
-        metrics::gauge!("backfill_worker_active").set(0.0);
-        log::info!("Worker {} shutdown (reason: {:?})", ctx.worker_id, ctx.reason);
-    }
+        hooks.on(WorkerShutdown, |ctx: WorkerShutdownContext| async move {
+            metrics::gauge!("backfill_worker_active").set(0.0);
+            log::info!("Worker {} shutdown (reason: {:?})", ctx.worker_id, ctx.reason);
+        });
 
-    async fn on_job_start(&self, ctx: JobStartContext) {
-        let task = ctx.job.task_identifier();
-        let attempt = ctx.job.attempts();
+        hooks.on(JobStart, |ctx: JobStartContext| async move {
+            let task = ctx.job.task_identifier();
+            let attempt = ctx.job.attempts();
 
-        metrics::counter!("jobs_started", "task" => task.clone()).increment(1);
+            metrics::counter!("jobs_started", "task" => task.clone()).increment(1);
 
-        log::debug!("Job started: {} (attempt {})", task, attempt);
+            log::debug!("Job started: {} (attempt {})", task, attempt);
 
-        // Track wait time (time from creation to start)
-        let created_at = ctx.job.created_at();
-        let wait_time = chrono::Utc::now().signed_duration_since(*created_at).num_milliseconds() as f64 / 1000.0;
+            // Track wait time (time from creation to start)
+            let created_at = ctx.job.created_at();
+            let wait_time = chrono::Utc::now().signed_duration_since(*created_at).num_milliseconds() as f64 / 1000.0;
 
-        metrics::histogram!("job_wait_time_seconds", "task" => task.clone()).record(wait_time);
-    }
+            metrics::histogram!("job_wait_time_seconds", "task" => task.clone()).record(wait_time);
+        });
 
-    async fn on_job_complete(&self, ctx: JobCompleteContext) {
-        let task = ctx.job.task_identifier();
-        let attempt = ctx.job.attempts();
-        let duration = ctx.duration.as_secs_f64();
+        hooks.on(JobComplete, |ctx: JobCompleteContext| async move {
+            let task = ctx.job.task_identifier();
+            let attempt = ctx.job.attempts();
+            let duration = ctx.duration.as_secs_f64();
 
-        metrics::counter!("jobs_completed", "task" => task.clone(), "attempt" => attempt.to_string()).increment(1);
+            metrics::counter!("jobs_completed", "task" => task.clone(), "attempt" => attempt.to_string()).increment(1);
 
-        metrics::histogram!("job_duration_seconds", "task" => task.clone(), "status" => "success").record(duration);
+            metrics::histogram!("job_duration_seconds", "task" => task.clone(), "status" => "success").record(duration);
 
-        log::info!(
-            "Job completed: {} (attempt {}, duration: {:.2}s)",
-            task,
-            attempt,
-            duration
-        );
-    }
+            log::info!(
+                "Job completed: {} (attempt {}, duration: {:.2}s)",
+                task,
+                attempt,
+                duration
+            );
+        });
 
-    async fn on_job_fail(&self, ctx: JobFailContext) {
-        let task = ctx.job.task_identifier();
-        let attempt = ctx.job.attempts();
-        let will_retry = ctx.will_retry;
+        hooks.on(JobFail, |ctx: JobFailContext| async move {
+            let task = ctx.job.task_identifier();
+            let attempt = ctx.job.attempts();
+            let will_retry = ctx.will_retry;
 
-        // Use will_retry to distinguish between transient failures and final failures
-        let status = if will_retry { "retrying" } else { "failed" };
+            // Use will_retry to distinguish between transient failures and final failures
+            let status = if will_retry { "retrying" } else { "failed" };
 
-        metrics::counter!(
-            "jobs_failed",
-            "task" => task.clone(),
-            "attempt" => attempt.to_string(),
-            "will_retry" => status
-        )
-        .increment(1);
+            metrics::counter!(
+                "jobs_failed",
+                "task" => task.clone(),
+                "attempt" => attempt.to_string(),
+                "will_retry" => status
+            )
+            .increment(1);
 
-        // Classify the error type for more detailed metrics
-        let error_type = classify_error(&ctx.error);
-        metrics::counter!(
-            "job_errors_by_type",
-            "task" => task.clone(),
-            "error_type" => error_type
-        )
-        .increment(1);
+            // Classify the error type for more detailed metrics
+            let error_type = classify_error(&ctx.error);
+            metrics::counter!(
+                "job_errors_by_type",
+                "task" => task.clone(),
+                "error_type" => error_type
+            )
+            .increment(1);
 
-        log::warn!(
-            "Job failed: {} (attempt {}, will_retry: {}, error: {})",
-            task,
-            attempt,
-            will_retry,
-            ctx.error
-        );
-    }
+            log::warn!(
+                "Job failed: {} (attempt {}, will_retry: {}, error: {})",
+                task,
+                attempt,
+                will_retry,
+                ctx.error
+            );
+        });
 
-    async fn on_job_permanently_fail(&self, ctx: JobPermanentlyFailContext) {
-        let task = ctx.job.task_identifier();
-        let final_attempt = ctx.job.attempts();
+        hooks.on(JobPermanentlyFail, |ctx: JobPermanentlyFailContext| async move {
+            let task = ctx.job.task_identifier();
+            let final_attempt = ctx.job.attempts();
 
-        metrics::counter!("jobs_permanently_failed", "task" => task.clone()).increment(1);
+            metrics::counter!("jobs_permanently_failed", "task" => task.clone()).increment(1);
 
-        log::error!(
-            "Job permanently failed: {} (final attempt: {}, error: {})",
-            task,
-            final_attempt,
-            ctx.error
-        );
+            log::error!(
+                "Job permanently failed: {} (final attempt: {}, error: {})",
+                task,
+                final_attempt,
+                ctx.error
+            );
+        });
     }
 }
 

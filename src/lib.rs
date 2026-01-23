@@ -60,29 +60,45 @@
 //! ```
 
 use chrono::{DateTime, Utc};
-// Lifecycle hooks for plugins
+// Lifecycle hooks for plugins - new Plugin API with event registration
 pub use graphile_worker::{
+    // Event types (for hooks.on() registration)
+    AfterJobRun,
+    // Context types (for hook handlers)
     AfterJobRunContext,
+    BeforeJobRun,
     BeforeJobRunContext,
+    BeforeJobSchedule,
     BeforeJobScheduleContext,
+    CronJobScheduled,
     CronJobScheduledContext,
+    CronTick,
     CronTickContext,
+    // Plugin trait and registry
+    HookRegistry,
     // Result types
     HookResult,
     // Job type for accessing job data
     Job,
+    JobComplete,
     JobCompleteContext,
+    JobFail,
     JobFailContext,
+    JobFetch,
     JobFetchContext,
+    JobPermanentlyFail,
     JobPermanentlyFailContext,
     JobScheduleResult,
+    JobStart,
     JobStartContext,
-    // Trait
-    LifecycleHooks,
+    Plugin,
+    // Other
     ShutdownReason,
-    // Context types
+    WorkerInit,
     WorkerInitContext,
+    WorkerShutdown,
     WorkerShutdownContext,
+    WorkerStart,
     WorkerStartContext,
 };
 // Re-export commonly used types from graphile_worker

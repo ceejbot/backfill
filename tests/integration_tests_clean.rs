@@ -13,7 +13,7 @@ struct TestJob {
 
 /// Get a test database URL from environment or use default
 fn get_test_database_url() -> String {
-    std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://ceej@localhost:5432/backfill_test".to_string())
+    std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://localhost:5432/backfill_test".to_string())
 }
 
 /// One-time setup of test database
