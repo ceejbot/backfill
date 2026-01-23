@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "backfill"
-version = "0.5.2"
+version = "1.0.0"
 dependencies = [
  "axum",
  "chrono",
