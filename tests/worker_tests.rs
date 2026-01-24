@@ -392,3 +392,329 @@ async fn test_worker_with_custom_poll_interval() -> Result<(), BackfillError> {
 
     Ok(())
 }
+
+// =============================================================================
+// Queue Concurrency Tests
+// =============================================================================
+
+use backfill::{JobSpec, Queue};
+
+/// Test that parallel jobs can be locked concurrently (no queue lock blocking)
+#[tokio::test]
+async fn test_parallel_jobs_concurrent_locking() -> Result<(), BackfillError> {
+    use uuid::Uuid;
+
+    let schema = format!("test_parallel_lock_{}", Uuid::new_v4().simple());
+    let config = WorkerConfig::new(get_test_database_url())
+        .with_schema(&schema)
+        .with_dlq_processor_interval(None);
+
+    let worker = WorkerRunner::builder(config)
+        .await?
+        .define_job::<SimpleTestJob>()
+        .build()
+        .await?;
+
+    let client = worker.client();
+    let pool = client.pool();
+
+    // Enqueue 3 parallel jobs
+    for i in 0..3 {
+        let job = SimpleTestJob {
+            message: format!("Parallel job {}", i),
+        };
+        client
+            .enqueue(SimpleTestJob::IDENTIFIER, &job, JobSpec::default())
+            .await?;
+    }
+
+    // Simulate locking all 3 jobs with different worker IDs
+    // This mimics what graphile_worker does when fetching jobs
+    let locked_count: (i64,) = sqlx::query_as(&format!(
+        r#"
+        WITH locked AS (
+            UPDATE {schema}."_private_jobs"
+            SET locked_at = NOW(), locked_by = 'test_worker_1'
+            WHERE id = (
+                SELECT id FROM {schema}."_private_jobs"
+                WHERE is_available = true AND job_queue_id IS NULL
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id
+        )
+        SELECT COUNT(*) FROM locked
+        "#,
+        schema = schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(locked_count.0, 1, "Should lock first parallel job");
+
+    // Lock second job with different worker
+    let locked_count2: (i64,) = sqlx::query_as(&format!(
+        r#"
+        WITH locked AS (
+            UPDATE {schema}."_private_jobs"
+            SET locked_at = NOW(), locked_by = 'test_worker_2'
+            WHERE id = (
+                SELECT id FROM {schema}."_private_jobs"
+                WHERE is_available = true AND job_queue_id IS NULL AND locked_at IS NULL
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id
+        )
+        SELECT COUNT(*) FROM locked
+        "#,
+        schema = schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(locked_count2.0, 1, "Should lock second parallel job concurrently");
+
+    // Lock third job with different worker
+    let locked_count3: (i64,) = sqlx::query_as(&format!(
+        r#"
+        WITH locked AS (
+            UPDATE {schema}."_private_jobs"
+            SET locked_at = NOW(), locked_by = 'test_worker_3'
+            WHERE id = (
+                SELECT id FROM {schema}."_private_jobs"
+                WHERE is_available = true AND job_queue_id IS NULL AND locked_at IS NULL
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id
+        )
+        SELECT COUNT(*) FROM locked
+        "#,
+        schema = schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(locked_count3.0, 1, "Should lock third parallel job concurrently");
+
+    // Verify all 3 are locked simultaneously
+    let total_locked: (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE locked_at IS NOT NULL",
+        schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(total_locked.0, 3, "All 3 parallel jobs should be locked simultaneously");
+
+    // Clean up
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Test that serial jobs block each other (queue lock prevents concurrent
+/// execution)
+#[tokio::test]
+async fn test_serial_jobs_queue_locking() -> Result<(), BackfillError> {
+    use uuid::Uuid;
+
+    let schema = format!("test_serial_lock_{}", Uuid::new_v4().simple());
+    let config = WorkerConfig::new(get_test_database_url())
+        .with_schema(&schema)
+        .with_dlq_processor_interval(None);
+
+    let worker = WorkerRunner::builder(config)
+        .await?
+        .define_job::<SimpleTestJob>()
+        .build()
+        .await?;
+
+    let client = worker.client();
+    let pool = client.pool();
+
+    // Enqueue 3 serial jobs in the SAME queue
+    for i in 0..3 {
+        let job = SimpleTestJob {
+            message: format!("Serial job {}", i),
+        };
+        client
+            .enqueue(
+                SimpleTestJob::IDENTIFIER,
+                &job,
+                JobSpec {
+                    queue: Queue::serial("serial-queue"),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
+
+    // Get the queue ID
+    let queue_id: i32 = sqlx::query_scalar(&format!(
+        "SELECT id FROM {}.\"_private_job_queues\" WHERE queue_name = 'serial-queue'",
+        schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    // Lock the queue (simulating first worker acquiring it)
+    sqlx::query(&format!(
+        "UPDATE {}.\"_private_job_queues\" SET locked_at = NOW(), locked_by = 'test_worker_1' WHERE id = $1",
+        schema
+    ))
+    .bind(queue_id)
+    .execute(pool)
+    .await?;
+
+    // Lock the first job
+    let first_job_locked: (i64,) = sqlx::query_as(&format!(
+        r#"
+        WITH locked AS (
+            UPDATE {schema}."_private_jobs"
+            SET locked_at = NOW(), locked_by = 'test_worker_1'
+            WHERE id = (
+                SELECT id FROM {schema}."_private_jobs"
+                WHERE is_available = true AND job_queue_id = $1
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id
+        )
+        SELECT COUNT(*) FROM locked
+        "#,
+        schema = schema
+    ))
+    .bind(queue_id)
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(first_job_locked.0, 1, "Should lock first serial job");
+
+    // Now try to fetch another job from the same queue with a different worker
+    // This should fail because the queue is locked (SKIP LOCKED will skip it)
+    let second_fetch: (i64,) = sqlx::query_as(&format!(
+        r#"
+        SELECT COUNT(*) FROM {schema}."_private_jobs" j
+        WHERE j.is_available = true
+          AND j.locked_at IS NULL
+          AND j.job_queue_id IN (
+              SELECT id FROM {schema}."_private_job_queues"
+              WHERE locked_at IS NULL  -- Queue must not be locked
+          )
+        "#,
+        schema = schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(
+        second_fetch.0, 0,
+        "No more jobs should be fetchable while queue is locked"
+    );
+
+    // Verify queue is locked
+    let queue_locked: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT locked_by FROM {}.\"_private_job_queues\" WHERE id = $1",
+        schema
+    ))
+    .bind(queue_id)
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(
+        queue_locked,
+        Some("test_worker_1".to_string()),
+        "Queue should be locked by first worker"
+    );
+
+    // Clean up
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Test that different serial queues are independent (can run concurrently)
+#[tokio::test]
+async fn test_different_serial_queues_independent() -> Result<(), BackfillError> {
+    use uuid::Uuid;
+
+    let schema = format!("test_multi_serial_{}", Uuid::new_v4().simple());
+    let config = WorkerConfig::new(get_test_database_url())
+        .with_schema(&schema)
+        .with_dlq_processor_interval(None);
+
+    let worker = WorkerRunner::builder(config)
+        .await?
+        .define_job::<SimpleTestJob>()
+        .build()
+        .await?;
+
+    let client = worker.client();
+    let pool = client.pool();
+
+    // Enqueue jobs in different serial queues
+    for queue_name in ["queue-a", "queue-b", "queue-c"] {
+        let job = SimpleTestJob {
+            message: format!("Job in {}", queue_name),
+        };
+        client
+            .enqueue(
+                SimpleTestJob::IDENTIFIER,
+                &job,
+                JobSpec {
+                    queue: Queue::serial(queue_name),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
+
+    // Lock queue-a
+    sqlx::query(&format!(
+        "UPDATE {}.\"_private_job_queues\" SET locked_at = NOW(), locked_by = 'worker_a' WHERE queue_name = 'queue-a'",
+        schema
+    ))
+    .execute(pool)
+    .await?;
+
+    // Lock queue-b
+    sqlx::query(&format!(
+        "UPDATE {}.\"_private_job_queues\" SET locked_at = NOW(), locked_by = 'worker_b' WHERE queue_name = 'queue-b'",
+        schema
+    ))
+    .execute(pool)
+    .await?;
+
+    // Queue-c should still be available
+    let available_queues: (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM {}.\"_private_job_queues\" WHERE locked_at IS NULL",
+        schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(available_queues.0, 1, "Queue-c should still be available");
+
+    // Verify queue-c is the unlocked one
+    let unlocked_queue: String = sqlx::query_scalar(&format!(
+        "SELECT queue_name FROM {}.\"_private_job_queues\" WHERE locked_at IS NULL",
+        schema
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    assert_eq!(unlocked_queue, "queue-c");
+
+    // Clean up
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}

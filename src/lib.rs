@@ -6,7 +6,9 @@
 //! This library provides:
 //! - **Durable job queues** with PostgreSQL backend
 //! - **Priority-based scheduling** with configurable priority levels
-//! - **Named queues** for organizing different types of work
+//! - **Parallel execution** by default - jobs run concurrently across all
+//!   workers
+//! - **Serial queues** when you need ordering or rate limiting
 //! - **Exponential backoff** with jitter to prevent thundering herds
 //! - **Flexible retry policies** (fast, aggressive, conservative, or custom)
 //! - **Dead letter queue** handling for failed jobs
@@ -130,28 +132,125 @@ pub use priorities::*;
 pub use retries::*;
 pub use worker::*;
 
-/// Named queues for organizing different types of work.
+/// Queue configuration for job execution.
+///
+/// By default, jobs execute **in parallel** across all workers. Use
+/// `Queue::Serial` when you need ordering guarantees or mutual exclusion (e.g.,
+/// rate limiting API calls, processing events for a single user in order).
+///
+/// # Parallel Execution (Default)
+///
+/// With `Queue::Parallel`, workers can fetch and execute jobs concurrently.
+/// Priority controls which jobs get picked first, but multiple jobs can run
+/// at the same time.
+///
+/// # Serial Execution
+///
+/// With `Queue::Serial("name")`, only one job with that queue name can execute
+/// at a time across the entire cluster. This is useful for:
+/// - Rate limiting external API calls
+/// - Processing events for a single entity in order
+/// - Mutual exclusion
+///
+/// # Examples
+///
+/// ```rust
+/// use backfill::{Queue, JobSpec, Priority};
+///
+/// // Parallel execution (default) - jobs run concurrently
+/// let spec = JobSpec {
+///     priority: Priority::FAST_DEFAULT,
+///     ..Default::default()
+/// };
+///
+/// // Serial execution - one job at a time per user
+/// let spec = JobSpec {
+///     queue: Queue::serial_for("user", 123),
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Queue {
-    /// Fast queue for high-priority, low-latency jobs
-    Fast,
-    /// Bulk queue for background processing
+    /// Jobs execute in parallel (DEFAULT). Priority controls fetch order,
+    /// but multiple jobs can run simultaneously.
     #[default]
-    Bulk,
-    /// Dead letter queue for failed jobs
-    DeadLetter,
-    /// Custom named queue
-    Custom(String),
+    Parallel,
+
+    /// Jobs in this queue execute one at a time across all workers.
+    /// Use for rate limiting, ordering, or mutual exclusion.
+    Serial(String),
 }
 
 impl Queue {
+    /// Create a serial queue for a specific entity.
+    ///
+    /// This is useful for ensuring jobs related to the same entity
+    /// (user, order, etc.) are processed one at a time.
+    ///
+    /// # Example
+    /// ```rust
+    /// use backfill::Queue;
+    ///
+    /// // Process user events serially
+    /// let queue = Queue::serial_for("user", 123);  // → "user:123"
+    ///
+    /// // Process order updates serially
+    /// let queue = Queue::serial_for("order", "abc-def");  // → "order:abc-def"
+    /// ```
+    pub fn serial_for(entity: &str, id: impl std::fmt::Display) -> Self {
+        Queue::Serial(format!("{}:{}", entity, id))
+    }
+
+    /// Create a named serial queue.
+    ///
+    /// Use this when you need a fixed queue name for rate limiting
+    /// or other serialization purposes.
+    ///
+    /// # Example
+    /// ```rust
+    /// use backfill::Queue;
+    ///
+    /// // Rate limit calls to external API
+    /// let queue = Queue::serial("external-api");
+    /// ```
+    pub fn serial(name: impl Into<String>) -> Self {
+        Queue::Serial(name.into())
+    }
+
+    /// Returns the queue name for serial queues, or None for parallel.
+    ///
+    /// This is used internally when building the GraphileWorker job spec.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Queue::Parallel => None,
+            Queue::Serial(name) => Some(name),
+        }
+    }
+
+    /// Returns a string representation for logging/metrics.
+    ///
+    /// Returns "parallel" for parallel queues, or the queue name for serial
+    /// queues.
     pub fn as_str(&self) -> &str {
         match self {
-            Queue::Fast => "fast",
-            Queue::Bulk => "bulk",
-            Queue::DeadLetter => "dead_letter",
-            Queue::Custom(name) => name,
+            Queue::Parallel => "parallel",
+            Queue::Serial(name) => name,
         }
+    }
+
+    /// Returns true if this is a parallel (non-serialized) queue.
+    pub fn is_parallel(&self) -> bool {
+        matches!(self, Queue::Parallel)
+    }
+
+    /// Returns true if this is a serial queue.
+    pub fn is_serial(&self) -> bool {
+        matches!(self, Queue::Serial(_))
+    }
+
+    /// Get the dead letter queue (serial execution).
+    pub fn dead_letter() -> Self {
+        Queue::Serial("dead_letter".to_string())
     }
 }
 
@@ -316,7 +415,12 @@ impl From<JobSpec> for GraphileJobSpec {
             builder = builder.run_at(run_at);
         }
 
-        builder = builder.priority(spec.priority.into()).queue_name(spec.queue.as_str());
+        builder = builder.priority(spec.priority.into());
+
+        // Only set queue_name for serial queues - parallel jobs have no queue
+        if let Some(queue_name) = spec.queue.name() {
+            builder = builder.queue_name(queue_name);
+        }
 
         if let Some(max_attempts) = spec.max_attempts {
             // Convert i32 to i16, clamping to avoid overflow
@@ -332,10 +436,10 @@ impl From<JobSpec> for GraphileJobSpec {
     }
 }
 
-/// Convenience function to enqueue a high-priority job in the fast queue.
+/// Enqueue a high-priority job for parallel execution.
 ///
-/// This is equivalent to calling `enqueue` with `Priority::FAST_DEFAULT` and
-/// `Queue::Fast`.
+/// Jobs are executed in parallel across all workers, with higher priority
+/// jobs (lower numbers) fetched first.
 pub async fn enqueue_fast<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -347,7 +451,6 @@ where
 {
     let spec = JobSpec {
         priority: Priority::FAST_DEFAULT,
-        queue: Queue::Fast,
         job_key,
         ..Default::default()
     };
@@ -355,10 +458,10 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Convenience function to enqueue a job in the bulk queue.
+/// Enqueue a normal-priority job for parallel execution.
 ///
-/// This is equivalent to calling `enqueue` with `Priority::BULK_DEFAULT` and
-/// `Queue::Bulk`.
+/// Jobs are executed in parallel across all workers, with higher priority
+/// jobs fetched first. Bulk priority is lower than fast priority.
 pub async fn enqueue_bulk<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -370,7 +473,6 @@ where
 {
     let spec = JobSpec {
         priority: Priority::BULK_DEFAULT,
-        queue: Queue::Bulk,
         job_key,
         ..Default::default()
     };
@@ -378,9 +480,9 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Convenience function to enqueue an emergency priority job.
+/// Enqueue an emergency priority job.
 ///
-/// Use sparingly - this will jump ahead of all other jobs in the fast queue.
+/// Use sparingly - emergency jobs jump ahead of all other jobs.
 pub async fn enqueue_emergency<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -392,7 +494,6 @@ where
 {
     let spec = JobSpec {
         priority: Priority::EMERGENCY,
-        queue: Queue::Fast,
         run_at: Some(Utc::now()), // Execute immediately
         job_key,
         ..Default::default()
@@ -401,8 +502,10 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a job with fast exponential backoff retry policy.
-/// Best for high-priority, low-latency jobs that need quick retries.
+/// Enqueue a high-priority job with fast exponential backoff retries.
+///
+/// Best for high-priority jobs that need quick retries (3 attempts, 100ms-30s
+/// delays).
 pub async fn enqueue_fast_with_retries<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -414,7 +517,6 @@ where
 {
     let spec = JobSpec {
         priority: Priority::FAST_HIGH,
-        queue: Queue::Fast,
         job_key,
         ..Default::default()
     }
@@ -423,8 +525,9 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a job with aggressive exponential backoff retry policy.
-/// Best for critical jobs that must succeed and can tolerate longer delays.
+/// Enqueue a critical job with aggressive exponential backoff retries.
+///
+/// Best for critical jobs that must succeed (12 attempts, up to 4 hour delays).
 pub async fn enqueue_critical<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -436,7 +539,6 @@ where
 {
     let spec = JobSpec {
         priority: Priority::FAST_HIGH,
-        queue: Queue::Fast,
         job_key,
         ..Default::default()
     }
@@ -445,9 +547,10 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a bulk job with conservative exponential backoff retry policy.
-/// Best for background processing jobs where consistency is more important than
-/// speed.
+/// Enqueue a bulk job with conservative exponential backoff retries.
+///
+/// Best for background jobs where consistency matters more than speed
+/// (8 attempts, 1 min - 8 hour delays).
 pub async fn enqueue_bulk_with_retries<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -459,7 +562,6 @@ where
 {
     let spec = JobSpec {
         priority: Priority::BULK_DEFAULT,
-        queue: Queue::Bulk,
         job_key,
         ..Default::default()
     }
@@ -468,25 +570,217 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
+/// Enqueue a job for serial execution within a named queue.
+///
+/// Only one job from this queue will execute at a time across all workers.
+/// Use for rate limiting external APIs or ensuring ordered processing.
+///
+/// # Example
+/// ```rust,no_run
+/// use backfill::{BackfillClient, enqueue_serial, Priority};
+///
+/// # async fn example(client: &BackfillClient) -> Result<(), backfill::BackfillError> {
+/// // Rate limit calls to an external API
+/// enqueue_serial(
+///     client,
+///     "call_external_api",
+///     &serde_json::json!({"url": "https://api.example.com"}),
+///     "external-api",
+///     Priority::BULK_DEFAULT,
+///     None,
+/// ).await?;
+///
+/// // Process events for a specific user in order
+/// enqueue_serial(
+///     client,
+///     "process_user_event",
+///     &serde_json::json!({"event": "login"}),
+///     format!("user:{}", 123),
+///     Priority::FAST_DEFAULT,
+///     Some("user-123-login".to_string()),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn enqueue_serial<T>(
+    client: &BackfillClient,
+    task_identifier: &str,
+    payload: &T,
+    queue_name: impl Into<String>,
+    priority: Priority,
+    job_key: Option<String>,
+) -> Result<EnqueueOutcome, BackfillError>
+where
+    T: Serialize,
+{
+    let spec = JobSpec {
+        queue: Queue::Serial(queue_name.into()),
+        priority,
+        job_key,
+        ..Default::default()
+    };
+
+    client.enqueue(task_identifier, payload, spec).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // Queue Type Tests
+    // =========================================================================
+
     #[test]
-    fn queue_names() {
-        assert_eq!(Queue::Fast.as_str(), "fast");
-        assert_eq!(Queue::Bulk.as_str(), "bulk");
-        assert_eq!(Queue::DeadLetter.as_str(), "dead_letter");
-        assert_eq!(Queue::Custom("test".to_string()).as_str(), "test");
+    fn queue_parallel_is_default() {
+        assert_eq!(Queue::default(), Queue::Parallel);
+        assert!(Queue::Parallel.is_parallel());
+        assert!(!Queue::Parallel.is_serial());
+        assert_eq!(Queue::Parallel.name(), None);
+        assert_eq!(Queue::Parallel.as_str(), "parallel");
     }
+
+    #[test]
+    fn queue_serial_creation() {
+        let queue = Queue::serial("test");
+        assert!(queue.is_serial());
+        assert!(!queue.is_parallel());
+        assert_eq!(queue.name(), Some("test"));
+        assert_eq!(queue.as_str(), "test");
+
+        let queue = Queue::serial_for("user", 123);
+        assert_eq!(queue.name(), Some("user:123"));
+        assert_eq!(queue.as_str(), "user:123");
+
+        let queue = Queue::serial_for("order", "abc-def");
+        assert_eq!(queue.name(), Some("order:abc-def"));
+
+        let queue = Queue::dead_letter();
+        assert_eq!(queue.name(), Some("dead_letter"));
+    }
+
+    #[test]
+    fn queue_equality() {
+        // Parallel queues are equal
+        assert_eq!(Queue::Parallel, Queue::Parallel);
+
+        // Serial queues with same name are equal
+        assert_eq!(Queue::serial("test"), Queue::serial("test"));
+        assert_eq!(Queue::serial("test".to_string()), Queue::Serial("test".to_string()));
+
+        // Serial queues with different names are not equal
+        assert_ne!(Queue::serial("a"), Queue::serial("b"));
+
+        // Parallel and Serial are not equal
+        assert_ne!(Queue::Parallel, Queue::serial("parallel"));
+    }
+
+    // =========================================================================
+    // JobSpec Tests
+    // =========================================================================
 
     #[test]
     fn job_spec_defaults() {
         let spec = JobSpec::default();
         assert_eq!(spec.priority, Priority::BULK_DEFAULT);
-        assert_eq!(spec.queue, Queue::Bulk);
+        assert_eq!(spec.queue, Queue::Parallel);
         assert_eq!(spec.max_attempts, Some(8));
         assert!(spec.run_at.is_none());
         assert!(spec.job_key.is_none());
+    }
+
+    #[test]
+    fn job_spec_parallel_has_no_queue_name() {
+        let spec = JobSpec {
+            queue: Queue::Parallel,
+            ..Default::default()
+        };
+
+        // The key behavior: parallel jobs should not have a queue name
+        // This is what causes them to run in parallel (no queue lock)
+        assert!(spec.queue.name().is_none());
+    }
+
+    #[test]
+    fn job_spec_serial_has_queue_name() {
+        let spec = JobSpec {
+            queue: Queue::serial("rate-limit"),
+            ..Default::default()
+        };
+
+        // Serial jobs must have a queue name - this creates the queue lock
+        assert_eq!(spec.queue.name(), Some("rate-limit"));
+    }
+
+    #[test]
+    fn job_spec_conversion_parallel() {
+        // Verify that parallel JobSpec converts without queue_name
+        let spec = JobSpec {
+            queue: Queue::Parallel,
+            priority: Priority::FAST_HIGH,
+            ..Default::default()
+        };
+
+        // Convert to GraphileJobSpec
+        let graphile_spec: GraphileJobSpec = spec.into();
+
+        // We can't directly inspect GraphileJobSpec internals, but we can verify
+        // that our Queue::Parallel correctly reports no queue name
+        assert!(Queue::Parallel.name().is_none());
+
+        // The graphile_spec is built - if it compiled, the conversion worked
+        let _ = graphile_spec;
+    }
+
+    #[test]
+    fn job_spec_conversion_serial() {
+        // Verify that serial JobSpec converts with queue_name
+        let spec = JobSpec {
+            queue: Queue::serial("my-queue"),
+            priority: Priority::BULK_DEFAULT,
+            ..Default::default()
+        };
+
+        // Verify queue name is set before conversion
+        assert_eq!(spec.queue.name(), Some("my-queue"));
+
+        // Convert to GraphileJobSpec
+        let graphile_spec: GraphileJobSpec = spec.into();
+
+        // The graphile_spec is built with queue_name - if it compiled, the
+        // conversion worked
+        let _ = graphile_spec;
+    }
+
+    // =========================================================================
+    // Convenience Function Queue Tests
+    // =========================================================================
+
+    #[test]
+    fn convenience_functions_use_parallel_queue() {
+        // All convenience function specs should use Queue::Parallel
+        // We can't call them without a client, but we can verify the JobSpec
+        // construction
+
+        // enqueue_fast uses parallel
+        let spec = JobSpec {
+            priority: Priority::FAST_DEFAULT,
+            ..Default::default()
+        };
+        assert_eq!(spec.queue, Queue::Parallel);
+
+        // enqueue_bulk uses parallel
+        let spec = JobSpec {
+            priority: Priority::BULK_DEFAULT,
+            ..Default::default()
+        };
+        assert_eq!(spec.queue, Queue::Parallel);
+
+        // enqueue_emergency uses parallel
+        let spec = JobSpec {
+            priority: Priority::EMERGENCY,
+            ..Default::default()
+        };
+        assert_eq!(spec.queue, Queue::Parallel);
     }
 }

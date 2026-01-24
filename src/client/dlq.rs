@@ -314,11 +314,11 @@ impl BackfillClient {
             .ok_or_else(|| BackfillError::DlqJobNotFound(dlq_id))?;
 
         // Create job spec from DLQ job data
-        let queue = match dlq_job.queue_name.as_str() {
-            "fast" => Queue::Fast,
-            "bulk" => Queue::Bulk,
-            "dead_letter" => Queue::DeadLetter,
-            name => Queue::Custom(name.to_string()),
+        // Empty queue name means parallel execution; non-empty means serial
+        let queue = if dlq_job.queue_name.is_empty() {
+            Queue::Parallel
+        } else {
+            Queue::Serial(dlq_job.queue_name.clone())
         };
 
         let spec = JobSpec {

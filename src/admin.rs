@@ -391,7 +391,8 @@ pub struct LocksCleanupResponse {
 /// Row type for queue lock queries
 type QueueLockRow = (String, chrono::DateTime<chrono::Utc>, String, f64);
 
-/// Row type for job lock queries (id, task_identifier, locked_at, locked_by, locked_minutes, attempts, max_attempts)
+/// Row type for job lock queries (id, task_identifier, locked_at, locked_by,
+/// locked_minutes, attempts, max_attempts)
 type JobLockRow = (i64, String, chrono::DateTime<chrono::Utc>, String, f64, i16, i16);
 
 /// Create the admin router that can be mounted in any Axum application
@@ -515,11 +516,11 @@ where
     let mut spec = crate::JobSpec::default();
 
     if let Some(queue) = req.queue {
+        // Empty string or "parallel" means parallel execution; anything else is a
+        // serial queue
         spec.queue = match queue.as_str() {
-            "fast" => crate::Queue::Fast,
-            "bulk" => crate::Queue::Bulk,
-            "dead_letter" => crate::Queue::DeadLetter,
-            custom => crate::Queue::Custom(custom.to_string()),
+            "" | "parallel" => crate::Queue::Parallel,
+            name => crate::Queue::Serial(name.to_string()),
         };
     }
 

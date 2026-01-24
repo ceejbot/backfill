@@ -265,13 +265,13 @@ async fn test_add_to_dlq_preserves_queue_name() {
         number: 999,
     };
 
-    // Enqueue to "fast" queue
+    // Enqueue to "fast" serial queue
     let outcome = client
         .enqueue(
             "test_job",
             &test_job,
             JobSpec {
-                queue: Queue::Fast,
+                queue: Queue::serial("fast"),
                 ..Default::default()
             },
         )
@@ -494,13 +494,13 @@ async fn test_dlq_filter_by_queue() {
         number: 1,
     };
 
-    // Add jobs to different queues
+    // Add jobs to different serial queues
     let outcome1 = client
         .enqueue(
             "test_job",
             &test_job,
             JobSpec {
-                queue: Queue::Fast,
+                queue: Queue::serial("fast"),
                 ..Default::default()
             },
         )
@@ -512,7 +512,7 @@ async fn test_dlq_filter_by_queue() {
             "test_job",
             &test_job,
             JobSpec {
-                queue: Queue::Bulk,
+                queue: Queue::serial("bulk"),
                 ..Default::default()
             },
         )

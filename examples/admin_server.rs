@@ -91,7 +91,7 @@ async fn send_notification(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let spec = JobSpec {
         priority: Priority::FAST_HIGH,
-        queue: Queue::Fast,
+        queue: Queue::Parallel,
         job_key: Some(format!("email_{}", email_req.to)),
         ..Default::default()
     };
