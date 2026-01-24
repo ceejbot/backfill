@@ -329,6 +329,71 @@ pub struct DlqBatchDeleteResponse {
     pub affected_tasks: Vec<String>,
 }
 
+// =============================================================================
+// Lock Diagnostics Types
+// =============================================================================
+
+/// Information about a single queue lock
+#[derive(Serialize)]
+pub struct QueueLockInfo {
+    pub queue_name: String,
+    pub locked_at: chrono::DateTime<chrono::Utc>,
+    pub locked_by: String,
+    pub locked_minutes: f64,
+    pub is_stale: bool,
+}
+
+/// Information about a single job lock
+#[derive(Serialize)]
+pub struct JobLockInfo {
+    pub job_id: i64,
+    pub task_identifier: String,
+    pub locked_at: chrono::DateTime<chrono::Utc>,
+    pub locked_by: String,
+    pub locked_minutes: f64,
+    pub attempts: i16,
+    pub max_attempts: i16,
+    pub is_stale: bool,
+}
+
+/// Overall lock status response
+#[derive(Serialize)]
+pub struct LocksStatusResponse {
+    pub queue_locks: Vec<QueueLockInfo>,
+    pub job_locks: Vec<JobLockInfo>,
+    pub stale_queue_lock_count: usize,
+    pub stale_job_lock_count: usize,
+    pub queue_lock_stale_threshold_minutes: u64,
+    pub job_lock_stale_threshold_minutes: u64,
+    pub health_status: String,
+}
+
+/// Request to manually trigger stale lock cleanup
+#[derive(Deserialize)]
+pub struct LocksCleanupRequest {
+    /// Override the queue lock stale threshold (minutes)
+    pub queue_lock_threshold_minutes: Option<u64>,
+    /// Override the job lock stale threshold (minutes)
+    pub job_lock_threshold_minutes: Option<u64>,
+    /// If true, only report what would be cleaned without actually cleaning
+    pub dry_run: Option<bool>,
+}
+
+/// Response from manual lock cleanup
+#[derive(Serialize)]
+pub struct LocksCleanupResponse {
+    pub queue_locks_released: u64,
+    pub job_locks_released: u64,
+    pub failed_jobs_deleted: u64,
+    pub dry_run: bool,
+}
+
+/// Row type for queue lock queries
+type QueueLockRow = (String, chrono::DateTime<chrono::Utc>, String, f64);
+
+/// Row type for job lock queries (id, task_identifier, locked_at, locked_by, locked_minutes, attempts, max_attempts)
+type JobLockRow = (i64, String, chrono::DateTime<chrono::Utc>, String, f64, i16, i16);
+
 /// Create the admin router that can be mounted in any Axum application
 ///
 /// This router provides comprehensive backfill management endpoints:
@@ -367,6 +432,9 @@ where
         .route("/dlq/cleanup", post(cleanup_dlq::<S>))
         .route("/dlq/batch-requeue", post(batch_requeue_dlq_jobs::<S>))
         .route("/dlq/batch-delete", post(batch_delete_dlq_jobs::<S>))
+        // Lock diagnostics and cleanup
+        .route("/locks/status", get(locks_status::<S>))
+        .route("/locks/cleanup", post(locks_cleanup::<S>))
 }
 
 /// Health check endpoint - GET /health
@@ -990,5 +1058,250 @@ where
         deleted_count,
         dry_run: false,
         affected_tasks: affected_tasks.into_iter().collect(),
+    }))
+}
+
+// =============================================================================
+// Lock Diagnostics Endpoints
+// =============================================================================
+
+/// Default stale threshold for queue locks (5 minutes)
+const DEFAULT_QUEUE_LOCK_STALE_MINUTES: u64 = 5;
+/// Default stale threshold for job locks (30 minutes)
+const DEFAULT_JOB_LOCK_STALE_MINUTES: u64 = 30;
+
+/// Get current lock status - GET /locks/status
+///
+/// Returns information about all currently held queue and job locks,
+/// identifying which ones are potentially stale and blocking workers.
+async fn locks_status<S>(State(state): State<S>) -> Result<Json<LocksStatusResponse>, (StatusCode, Json<ErrorResponse>)>
+where
+    S: BackfillAdminState,
+{
+    let client = state.backfill_client();
+    let pool = client.pool();
+    let schema = client.schema();
+
+    // Query queue locks
+    let queue_locks_query = format!(
+        r#"
+        SELECT
+            queue_name,
+            locked_at,
+            locked_by,
+            EXTRACT(EPOCH FROM (NOW() - locked_at)) / 60.0 as locked_minutes
+        FROM {}._private_job_queues
+        WHERE locked_at IS NOT NULL
+        ORDER BY locked_at ASC
+        "#,
+        schema
+    );
+
+    let queue_locks: Vec<QueueLockRow> = sqlx::query_as(&queue_locks_query).fetch_all(pool).await.map_err(|e| {
+        error!("Failed to query queue locks: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                format!("Failed to query queue locks: {}", e),
+                "QUERY_ERROR",
+            )),
+        )
+    })?;
+
+    // Query job locks (with task identifier)
+    let job_locks_query = format!(
+        r#"
+        SELECT
+            j.id,
+            t.identifier as task_identifier,
+            j.locked_at,
+            j.locked_by,
+            EXTRACT(EPOCH FROM (NOW() - j.locked_at)) / 60.0 as locked_minutes,
+            j.attempts,
+            j.max_attempts
+        FROM {}._private_jobs j
+        JOIN {}._private_tasks t ON j.task_id = t.id
+        WHERE j.locked_at IS NOT NULL
+        ORDER BY j.locked_at ASC
+        LIMIT 100
+        "#,
+        schema, schema
+    );
+
+    let job_locks: Vec<JobLockRow> = sqlx::query_as(&job_locks_query).fetch_all(pool).await.map_err(|e| {
+        error!("Failed to query job locks: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                format!("Failed to query job locks: {}", e),
+                "QUERY_ERROR",
+            )),
+        )
+    })?;
+
+    // Convert to response types
+    let queue_lock_infos: Vec<QueueLockInfo> = queue_locks
+        .into_iter()
+        .map(|(queue_name, locked_at, locked_by, locked_minutes)| {
+            let is_stale = locked_minutes > DEFAULT_QUEUE_LOCK_STALE_MINUTES as f64;
+            QueueLockInfo {
+                queue_name,
+                locked_at,
+                locked_by,
+                locked_minutes,
+                is_stale,
+            }
+        })
+        .collect();
+
+    let job_lock_infos: Vec<JobLockInfo> = job_locks
+        .into_iter()
+        .map(
+            |(job_id, task_identifier, locked_at, locked_by, locked_minutes, attempts, max_attempts)| {
+                let is_stale = locked_minutes > DEFAULT_JOB_LOCK_STALE_MINUTES as f64;
+                JobLockInfo {
+                    job_id,
+                    task_identifier,
+                    locked_at,
+                    locked_by,
+                    locked_minutes,
+                    attempts,
+                    max_attempts,
+                    is_stale,
+                }
+            },
+        )
+        .collect();
+
+    let stale_queue_count = queue_lock_infos.iter().filter(|l| l.is_stale).count();
+    let stale_job_count = job_lock_infos.iter().filter(|l| l.is_stale).count();
+
+    // Determine health status
+    let health_status = if stale_queue_count > 0 {
+        "unhealthy - stale queue locks detected (workers may be blocked)"
+    } else if stale_job_count > 5 {
+        "warning - multiple stale job locks detected"
+    } else if stale_job_count > 0 {
+        "warning - stale job locks detected"
+    } else {
+        "healthy"
+    };
+
+    info!(
+        "Lock status: {} queue locks ({} stale), {} job locks ({} stale)",
+        queue_lock_infos.len(),
+        stale_queue_count,
+        job_lock_infos.len(),
+        stale_job_count
+    );
+
+    Ok(Json(LocksStatusResponse {
+        queue_locks: queue_lock_infos,
+        job_locks: job_lock_infos,
+        stale_queue_lock_count: stale_queue_count,
+        stale_job_lock_count: stale_job_count,
+        queue_lock_stale_threshold_minutes: DEFAULT_QUEUE_LOCK_STALE_MINUTES,
+        job_lock_stale_threshold_minutes: DEFAULT_JOB_LOCK_STALE_MINUTES,
+        health_status: health_status.to_string(),
+    }))
+}
+
+/// Manually trigger stale lock cleanup - POST /locks/cleanup
+///
+/// Releases stale queue and job locks. Use this for emergency cleanup
+/// when workers are blocked by stale locks from crashed workers.
+async fn locks_cleanup<S>(
+    State(state): State<S>,
+    Json(req): Json<LocksCleanupRequest>,
+) -> Result<Json<LocksCleanupResponse>, (StatusCode, Json<ErrorResponse>)>
+where
+    S: BackfillAdminState,
+{
+    let client = state.backfill_client();
+
+    let queue_lock_timeout = std::time::Duration::from_secs(
+        req.queue_lock_threshold_minutes
+            .unwrap_or(DEFAULT_QUEUE_LOCK_STALE_MINUTES)
+            * 60,
+    );
+    let job_lock_timeout =
+        std::time::Duration::from_secs(req.job_lock_threshold_minutes.unwrap_or(DEFAULT_JOB_LOCK_STALE_MINUTES) * 60);
+    let dry_run = req.dry_run.unwrap_or(false);
+
+    if dry_run {
+        // For dry run, query what would be cleaned
+        let pool = client.pool();
+        let schema = client.schema();
+
+        let queue_count_query = format!(
+            "SELECT COUNT(*) FROM {}._private_job_queues WHERE locked_at IS NOT NULL AND locked_at < NOW() - INTERVAL '{} seconds'",
+            schema,
+            queue_lock_timeout.as_secs()
+        );
+        let queue_count: (i64,) = sqlx::query_as(&queue_count_query).fetch_one(pool).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
+            )
+        })?;
+
+        let job_count_query = format!(
+            "SELECT COUNT(*) FROM {}._private_jobs WHERE locked_at IS NOT NULL AND locked_at < NOW() - INTERVAL '{} seconds'",
+            schema,
+            job_lock_timeout.as_secs()
+        );
+        let job_count: (i64,) = sqlx::query_as(&job_count_query).fetch_one(pool).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
+            )
+        })?;
+
+        let failed_count_query = format!(
+            "SELECT COUNT(*) FROM {}._private_jobs WHERE attempts >= max_attempts AND locked_at IS NULL",
+            schema
+        );
+        let failed_count: (i64,) = sqlx::query_as(&failed_count_query).fetch_one(pool).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
+            )
+        })?;
+
+        info!(
+            "Lock cleanup dry run: would release {} queue locks, {} job locks, delete {} failed jobs",
+            queue_count.0, job_count.0, failed_count.0
+        );
+
+        return Ok(Json(LocksCleanupResponse {
+            queue_locks_released: queue_count.0 as u64,
+            job_locks_released: job_count.0 as u64,
+            failed_jobs_deleted: failed_count.0 as u64,
+            dry_run: true,
+        }));
+    }
+
+    // Actually perform cleanup
+    let (queue_released, job_released, failed_deleted) = client
+        .startup_cleanup_with_timeouts(queue_lock_timeout, job_lock_timeout)
+        .await
+        .map_err(|e| {
+            error!("Lock cleanup failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(format!("Cleanup failed: {}", e), "CLEANUP_FAILED")),
+            )
+        })?;
+
+    info!(
+        "Lock cleanup completed: {} queue locks, {} job locks, {} failed jobs",
+        queue_released, job_released, failed_deleted
+    );
+
+    Ok(Json(LocksCleanupResponse {
+        queue_locks_released: queue_released,
+        job_locks_released: job_released,
+        failed_jobs_deleted: failed_deleted,
+        dry_run: false,
     }))
 }
