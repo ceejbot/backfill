@@ -174,20 +174,20 @@ async fn test_priority_ordering() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_named_queues() -> Result<()> {
+async fn test_serial_queues() -> Result<()> {
     with_isolated_schema(|client| async move {
         let test_job = TestJob {
             message: "Queue test".to_string(),
             number: 1,
         };
 
-        // Enqueue jobs in different queues
+        // Enqueue jobs in different serial queues
         let _fast_job = client
             .enqueue(
                 "test_job",
                 &test_job,
                 JobSpec {
-                    queue: Queue::Fast,
+                    queue: Queue::serial("fast"),
                     ..Default::default()
                 },
             )
@@ -198,7 +198,7 @@ async fn test_named_queues() -> Result<()> {
                 "test_job",
                 &test_job,
                 JobSpec {
-                    queue: Queue::Bulk,
+                    queue: Queue::serial("bulk"),
                     ..Default::default()
                 },
             )
@@ -209,7 +209,7 @@ async fn test_named_queues() -> Result<()> {
                 "test_job",
                 &test_job,
                 JobSpec {
-                    queue: Queue::Custom("special_processing".to_string()),
+                    queue: Queue::serial("special_processing"),
                     ..Default::default()
                 },
             )
@@ -394,39 +394,37 @@ async fn test_convenience_functions() -> Result<()> {
         let bulk_outcome = enqueue_bulk(&client, "test_job", &test_job, Some("bulk_job_key".to_string())).await?;
         assert!(bulk_outcome.is_enqueued());
 
-        // Verify the jobs are in the correct queues with correct priorities
+        // Verify the jobs use parallel execution (NULL job_queue_id) with correct
+        // priorities
         let pool = client.pool();
-        let fast_job_data: (String, i16) = sqlx::query_as(&format!(
-            "
-            SELECT q.queue_name, j.priority
-            FROM {}.\"_private_jobs\" j
-            JOIN {}.\"_private_job_queues\" q ON j.job_queue_id = q.id
-            WHERE j.key = 'fast_job_key'
-        ",
-            client.schema(),
+
+        // Fast job: parallel execution with FAST_DEFAULT priority (-5)
+        let fast_job_data: (Option<i32>, i16) = sqlx::query_as(&format!(
+            "SELECT job_queue_id, priority FROM {}.\"_private_jobs\" WHERE key = 'fast_job_key'",
             client.schema()
         ))
         .fetch_one(pool)
         .await?;
 
-        let bulk_job_data: (String, i16) = sqlx::query_as(&format!(
-            "
-            SELECT q.queue_name, j.priority
-            FROM {}.\"_private_jobs\" j
-            JOIN {}.\"_private_job_queues\" q ON j.job_queue_id = q.id
-            WHERE j.key = 'bulk_job_key'
-        ",
-            client.schema(),
+        assert!(
+            fast_job_data.0.is_none(),
+            "Fast jobs should use parallel execution (NULL job_queue_id)"
+        );
+        assert_eq!(fast_job_data.1, -5, "Fast jobs should have FAST_DEFAULT priority");
+
+        // Bulk job: parallel execution with BULK_DEFAULT priority (0)
+        let bulk_job_data: (Option<i32>, i16) = sqlx::query_as(&format!(
+            "SELECT job_queue_id, priority FROM {}.\"_private_jobs\" WHERE key = 'bulk_job_key'",
             client.schema()
         ))
         .fetch_one(pool)
         .await?;
 
-        assert_eq!(fast_job_data.0, "fast");
-        assert_eq!(fast_job_data.1, -5); // FAST_DEFAULT
-
-        assert_eq!(bulk_job_data.0, "bulk");
-        assert_eq!(bulk_job_data.1, 0); // BULK_DEFAULT
+        assert!(
+            bulk_job_data.0.is_none(),
+            "Bulk jobs should use parallel execution (NULL job_queue_id)"
+        );
+        assert_eq!(bulk_job_data.1, 0, "Bulk jobs should have BULK_DEFAULT priority");
 
         Ok(())
     })
@@ -848,6 +846,363 @@ async fn test_startup_cleanup_releases_both_lock_types() -> Result<()> {
         .fetch_one(pool)
         .await?;
         assert_eq!(job_locked_by, None, "Job lock should be released");
+
+        Ok(())
+    })
+    .await
+}
+
+// =============================================================================
+// Queue Parallel vs Serial Behavior Tests
+// =============================================================================
+
+/// Test that parallel jobs have no job_queue_id (critical for parallel
+/// execution)
+#[tokio::test]
+async fn test_parallel_jobs_have_no_queue_id() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let test_job = TestJob {
+            message: "parallel test".to_string(),
+            number: 1,
+        };
+
+        // Enqueue with default (parallel) queue
+        let outcome = client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        let job = outcome.expect("should enqueue");
+
+        // Verify job_queue_id is NULL in the database
+        let pool = client.pool();
+        let job_queue_id: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT job_queue_id FROM {}.\"_private_jobs\" WHERE id = $1",
+            client.schema()
+        ))
+        .bind(job.id())
+        .fetch_one(pool)
+        .await?;
+
+        assert!(
+            job_queue_id.is_none(),
+            "Parallel jobs must have NULL job_queue_id to run concurrently"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test that serial jobs have a job_queue_id (required for serialization)
+#[tokio::test]
+async fn test_serial_jobs_have_queue_id() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let test_job = TestJob {
+            message: "serial test".to_string(),
+            number: 1,
+        };
+
+        // Enqueue with serial queue
+        let outcome = client
+            .enqueue(
+                "test_job",
+                &test_job,
+                JobSpec {
+                    queue: Queue::serial("my-serial-queue"),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let job = outcome.expect("should enqueue");
+
+        // Verify job_queue_id is NOT NULL in the database
+        let pool = client.pool();
+        let job_queue_id: Option<i32> = sqlx::query_scalar(&format!(
+            "SELECT job_queue_id FROM {}.\"_private_jobs\" WHERE id = $1",
+            client.schema()
+        ))
+        .bind(job.id())
+        .fetch_one(pool)
+        .await?;
+
+        let job_queue_id = job_queue_id.expect("Serial jobs must have a job_queue_id for serialization");
+
+        // Also verify the queue row exists with correct name
+        let queue_name: String = sqlx::query_scalar(&format!(
+            "SELECT queue_name FROM {}.\"_private_job_queues\" WHERE id = $1",
+            client.schema()
+        ))
+        .bind(job_queue_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(queue_name, "my-serial-queue");
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test that multiple parallel jobs can be enqueued without creating queue
+/// locks
+#[tokio::test]
+async fn test_parallel_jobs_no_queue_rows() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue 5 parallel jobs
+        for i in 0..5 {
+            let test_job = TestJob {
+                message: format!("parallel job {}", i),
+                number: i,
+            };
+            client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        }
+
+        // Count how many jobs were created
+        let job_count: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NULL",
+            schema
+        ))
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(job_count.0, 5, "All 5 jobs should have NULL job_queue_id");
+
+        // Verify no queue rows were created for parallel jobs
+        // (There might be other queues from setup, so we check specifically
+        // for queue rows that have jobs pointing to them)
+        let queues_with_jobs: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(DISTINCT job_queue_id) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
+            schema
+        ))
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            queues_with_jobs.0, 0,
+            "Parallel jobs should not create queue associations"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test that serial jobs in the same queue share a queue row
+#[tokio::test]
+async fn test_serial_jobs_share_queue_row() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue 3 serial jobs in the same queue
+        for i in 0..3 {
+            let test_job = TestJob {
+                message: format!("serial job {}", i),
+                number: i,
+            };
+            client
+                .enqueue(
+                    "test_job",
+                    &test_job,
+                    JobSpec {
+                        queue: Queue::serial("shared-queue"),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+
+        // All jobs should reference the same queue row
+        let distinct_queue_ids: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(DISTINCT job_queue_id) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
+            schema
+        ))
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            distinct_queue_ids.0, 1,
+            "All serial jobs in same queue should share one queue row"
+        );
+
+        // Verify queue name is correct
+        let queue_name: String = sqlx::query_scalar(&format!(
+            r#"
+            SELECT q.queue_name
+            FROM {schema}."_private_job_queues" q
+            JOIN {schema}."_private_jobs" j ON j.job_queue_id = q.id
+            LIMIT 1
+            "#,
+            schema = schema
+        ))
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(queue_name, "shared-queue");
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test that different serial queues are independent
+#[tokio::test]
+async fn test_different_serial_queues_independent() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue jobs in different serial queues
+        let queues = ["queue-a", "queue-b", "queue-c"];
+        for queue_name in queues {
+            let test_job = TestJob {
+                message: format!("job in {}", queue_name),
+                number: 1,
+            };
+            client
+                .enqueue(
+                    "test_job",
+                    &test_job,
+                    JobSpec {
+                        queue: Queue::serial(queue_name),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+
+        // Each should have its own queue row
+        let distinct_queue_ids: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(DISTINCT job_queue_id) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
+            schema
+        ))
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            distinct_queue_ids.0, 3,
+            "Each serial queue should have its own queue row"
+        );
+
+        // Verify all queue names exist
+        let queue_names: Vec<(String,)> = sqlx::query_as(&format!(
+            r#"
+            SELECT DISTINCT q.queue_name
+            FROM {schema}."_private_job_queues" q
+            JOIN {schema}."_private_jobs" j ON j.job_queue_id = q.id
+            ORDER BY q.queue_name
+            "#,
+            schema = schema
+        ))
+        .fetch_all(pool)
+        .await?;
+
+        let names: Vec<&str> = queue_names.iter().map(|(n,)| n.as_str()).collect();
+        assert_eq!(names, vec!["queue-a", "queue-b", "queue-c"]);
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test serial_for creates unique queues per entity
+#[tokio::test]
+async fn test_serial_for_per_entity_queues() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue jobs for different users
+        for user_id in [100, 200, 300] {
+            let test_job = TestJob {
+                message: format!("event for user {}", user_id),
+                number: user_id,
+            };
+            client
+                .enqueue(
+                    "test_job",
+                    &test_job,
+                    JobSpec {
+                        queue: Queue::serial_for("user", user_id),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+
+        // Each user should have their own queue
+        let queue_names: Vec<(String,)> = sqlx::query_as(&format!(
+            r#"
+            SELECT DISTINCT q.queue_name
+            FROM {schema}."_private_job_queues" q
+            JOIN {schema}."_private_jobs" j ON j.job_queue_id = q.id
+            ORDER BY q.queue_name
+            "#,
+            schema = schema
+        ))
+        .fetch_all(pool)
+        .await?;
+
+        let names: Vec<&str> = queue_names.iter().map(|(n,)| n.as_str()).collect();
+        assert_eq!(names, vec!["user:100", "user:200", "user:300"]);
+
+        Ok(())
+    })
+    .await
+}
+
+/// Test mixed parallel and serial jobs
+#[tokio::test]
+async fn test_mixed_parallel_and_serial_jobs() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let pool = client.pool();
+        let schema = client.schema();
+
+        // Enqueue some parallel jobs
+        for i in 0..3 {
+            let test_job = TestJob {
+                message: format!("parallel {}", i),
+                number: i,
+            };
+            client.enqueue("test_job", &test_job, JobSpec::default()).await?;
+        }
+
+        // Enqueue some serial jobs
+        for i in 0..2 {
+            let test_job = TestJob {
+                message: format!("serial {}", i),
+                number: i + 100,
+            };
+            client
+                .enqueue(
+                    "test_job",
+                    &test_job,
+                    JobSpec {
+                        queue: Queue::serial("rate-limit"),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+
+        // Count parallel jobs (NULL job_queue_id)
+        let parallel_count: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NULL",
+            schema
+        ))
+        .fetch_one(pool)
+        .await?;
+
+        // Count serial jobs (non-NULL job_queue_id)
+        let serial_count: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
+            schema
+        ))
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(parallel_count.0, 3, "Should have 3 parallel jobs");
+        assert_eq!(serial_count.0, 2, "Should have 2 serial jobs");
 
         Ok(())
     })

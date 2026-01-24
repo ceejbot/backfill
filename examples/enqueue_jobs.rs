@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &example_job,
             JobSpec {
                 priority: Priority::BULK_DEFAULT,
-                queue: Queue::Custom("default".to_string()),
+                queue: Queue::Parallel,
                 job_key: Some("example-1".to_string()),
                 ..Default::default()
             },
@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &report_job,
             JobSpec {
                 priority: Priority::BULK_LOW,
-                queue: Queue::Custom("reports".to_string()),
+                queue: Queue::serial("reports"),
                 run_at: Some(chrono::Utc::now() + chrono::Duration::seconds(30)),
                 job_key: Some("monthly-summary-2024-09".to_string()),
                 ..Default::default()
@@ -176,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &failing_job,
             JobSpec {
                 priority: Priority::BULK_DEFAULT,
-                queue: Queue::Custom("default".to_string()),
+                queue: Queue::Parallel,
                 job_key: Some("failing-example".to_string()),
                 ..Default::default()
             },
@@ -270,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &custom_job,
             JobSpec {
                 priority: Priority::BULK_DEFAULT,
-                queue: Queue::Custom("analytics".to_string()),
+                queue: Queue::serial("analytics"),
                 job_key: Some("weekly-analytics".to_string()),
                 ..Default::default()
             }

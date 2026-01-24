@@ -7,7 +7,34 @@ and this project will adhere to [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Breaking Changes
+- **Queue API redesigned for parallel-by-default execution**
+  - Removed `Queue::Fast`, `Queue::Bulk`, `Queue::DeadLetter`, `Queue::Custom` variants
+  - Added `Queue::Parallel` (now the default) and `Queue::Serial(String)`
+  - Jobs now execute **in parallel** by default across all workers
+  - Use `Queue::serial("name")` or `Queue::serial_for("entity", id)` when you need serialization
+
+  **Migration guide:**
+  ```rust
+  // Before (v1.x): Named queues caused unintended serialization
+  JobSpec { queue: Queue::Fast, .. }      // ALL "fast" jobs ran one at a time!
+  JobSpec { queue: Queue::Bulk, .. }      // ALL "bulk" jobs ran one at a time!
+  JobSpec { queue: Queue::Custom("x".into()), .. }
+
+  // After (v2.x): Parallel by default, explicit serialization
+  JobSpec { queue: Queue::Parallel, .. }  // Jobs run concurrently (default)
+  JobSpec { queue: Queue::serial("rate-limit-api"), .. }  // Explicit serialization
+  JobSpec { queue: Queue::serial_for("user", user_id), .. }  // Per-entity serialization
+  ```
+
 ### Added
+- `Queue::serial(name)` - create a named serial queue
+- `Queue::serial_for(entity, id)` - create per-entity serial queues (e.g., "user:123")
+- `Queue::is_parallel()` and `Queue::is_serial()` helper methods
+- `enqueue_serial()` convenience function for explicit serial execution
+- Admin API endpoints for lock diagnostics: `GET /locks/status`, `POST /locks/cleanup`
+- Docker Compose configuration for test database
+- Comprehensive queue behavior tests (parallel vs serial execution)
 - Implemented `WorkerRunner::process_available_jobs()` for batch processing and testing scenarios
 - Comprehensive Dead Letter Queue (DLQ) system with full CRUD operations
 - DLQ processor for automatic migration of failed jobs to the DLQ table
@@ -15,7 +42,6 @@ and this project will adhere to [Semantic Versioning](https://semver.org/spec/v2
 - Exponential backoff retry system with jitter to prevent thundering herds
 - Three preset retry policies: `fast()`, `aggressive()`, `conservative()`
 - Priority-based job scheduling with six priority levels
-- Named queue support (Fast, Bulk, Custom)
 - Comprehensive metrics using the `metrics` facade crate
 - Structured logging via the `log` crate
 - Complete documentation suite (8 major guides + examples)
