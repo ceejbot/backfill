@@ -291,6 +291,60 @@ async fn test_add_to_dlq_preserves_queue_name() {
 }
 
 #[tokio::test]
+async fn test_parallel_job_stays_parallel_through_dlq() {
+    let client = setup_test_client("dlq_parallel_roundtrip").await;
+    client.init_dlq().await.expect("DLQ init should work");
+
+    let test_job = TestJob {
+        message: "parallel job test".to_string(),
+        number: 777,
+    };
+
+    // Enqueue as parallel job (default)
+    let outcome = client
+        .enqueue(
+            "test_job",
+            &test_job,
+            JobSpec {
+                job_key: Some("parallel_dlq_test".to_string()),
+                ..Default::default() // Queue::Parallel is the default
+            },
+        )
+        .await
+        .expect("should enqueue");
+
+    let job = outcome.unwrap();
+
+    // Verify original job has no queue_id (parallel)
+    assert!(job.job_queue_id().is_none(), "parallel job should have no queue_id");
+
+    // Add to DLQ
+    let dlq_job = client
+        .add_to_dlq(&job, "Test failure", None)
+        .await
+        .expect("should add to DLQ");
+
+    // Verify queue_name is empty string (not "default")
+    assert!(
+        dlq_job.queue_name.is_empty(),
+        "parallel job should have empty queue_name in DLQ, got: '{}'",
+        dlq_job.queue_name
+    );
+
+    // Requeue the job
+    let requeued = client
+        .requeue_dlq_job(dlq_job.id, Some("Testing parallel preservation".to_string()))
+        .await
+        .expect("should requeue");
+
+    // Verify requeued job is still parallel (no queue_id)
+    assert!(
+        requeued.job_queue_id().is_none(),
+        "requeued parallel job should still have no queue_id"
+    );
+}
+
+#[tokio::test]
 async fn test_dlq_list_with_filtering() {
     let client = setup_test_client("dlq_list_filter").await;
     client.init_dlq().await.expect("DLQ init should work");

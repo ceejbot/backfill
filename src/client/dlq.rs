@@ -493,7 +493,9 @@ impl BackfillClient {
     ) -> Result<DlqJob, BackfillError> {
         let start = std::time::Instant::now();
 
-        // Query queue_name from job_queue_id
+        // Query queue_name from job_queue_id.
+        // For parallel jobs (no queue_id), use empty string so requeue preserves
+        // parallel execution. The requeue logic treats empty string as Queue::Parallel.
         let queue_name = if let Some(queue_id) = original_job.job_queue_id() {
             let query = format!(
                 "SELECT queue_name FROM {}._private_job_queues WHERE id = $1",
@@ -505,7 +507,9 @@ impl BackfillClient {
                 .await?
                 .unwrap_or_else(|| "default".to_string())
         } else {
-            "default".to_string()
+            // Parallel jobs have no queue_id - use empty string to preserve
+            // parallel execution when requeued (is_empty() check in requeue_dlq_job)
+            String::new()
         };
 
         // Use UPSERT to handle the case where a requeued job fails again.
@@ -618,7 +622,9 @@ impl BackfillClient {
             let task_identifier: String = job_row.get("task_identifier");
             let payload: serde_json::Value = job_row.get("payload");
             let queue_name: Option<String> = job_row.get("queue_name");
-            let queue_name = queue_name.unwrap_or_else(|| "default".to_string());
+            // Use empty string for parallel jobs (NULL queue_name) to preserve
+            // parallel execution when requeued
+            let queue_name = queue_name.unwrap_or_default();
             let priority: i16 = job_row.get("priority");
             let job_key: Option<String> = job_row.get("job_key");
             let max_attempts: i16 = job_row.get("max_attempts");
