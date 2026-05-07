@@ -95,6 +95,32 @@ impl TaskHandler for FailJob {
     }
 }
 
+// Test job that fails on the first `succeed_at - 1` attempts then succeeds.
+//
+// `attempts` here is the value graphile_worker increments at fetch time, so
+// the very first call sees attempt=1, the second sees attempt=2, etc. With
+// `succeed_at = 3` the handler returns Err on attempts 1 and 2, then Ok on
+// attempt 3.
+#[derive(Clone, Serialize, Deserialize)]
+struct EventuallySucceedJob {
+    succeed_at: i16,
+}
+
+impl TaskHandler for EventuallySucceedJob {
+    const IDENTIFIER: &'static str = "eventually_succeed_job";
+
+    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        let attempt = *ctx.job().attempts();
+        if attempt < self.succeed_at {
+            Err(WorkerError::TemporaryUnavailable {
+                message: format!("not yet — attempt {attempt} < {}", self.succeed_at),
+            })
+        } else {
+            Ok::<(), WorkerError>(())
+        }
+    }
+}
+
 /// Test plugin that counts hook invocations
 #[derive(Clone)]
 struct CountingPlugin {
@@ -547,6 +573,91 @@ async fn test_retry_to_exhaustion_then_dlq_via_worker() -> Result<()> {
             .fetch_one(client.pool())
             .await?;
         assert_eq!(count.0, 0, "_private_jobs should be empty after DLQ move");
+
+        Ok(())
+    })
+    .await
+}
+
+/// Coverage for the retry-then-eventual-success path: a handler that
+/// returns Err on its first few attempts and `Ok` on a later attempt should
+/// run to completion just like a never-failed job. This validates that the
+/// retry mechanism returns cleanly to the success path — no stuck rows, no
+/// DLQ leakage, no leftover state in `_private_jobs`.
+///
+/// The retry-then-DLQ path is covered by
+/// `test_retry_to_exhaustion_then_dlq_via_worker`. This is the symmetric
+/// "succeeded eventually" counterpart.
+#[tokio::test]
+async fn test_retry_then_eventual_success() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        // Handler fails on attempts 1, 2 (with a retryable error so
+        // PermanentFailurePlugin doesn't short-circuit) and succeeds on
+        // attempt 3.
+        client
+            .enqueue(
+                "eventually_succeed_job",
+                &EventuallySucceedJob { succeed_at: 3 },
+                JobSpec {
+                    max_attempts: Some(5),
+                    job_key: Some("retry_then_success".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let config = WorkerConfig::new(get_test_database_url())
+            .with_schema(client.schema().to_string())
+            .with_poll_interval(Duration::from_millis(50));
+        let worker = WorkerRunner::builder(config)
+            .await?
+            .define_job::<EventuallySucceedJob>()
+            .build()
+            .await?;
+
+        // Iteratively run + fast-forward run_at, same trick as the exhaustion
+        // test. Bounded loop so a regression that breaks the success path
+        // doesn't hang the test.
+        const MAX_ITERATIONS: usize = 10;
+        let mut succeeded = false;
+        for _ in 0..MAX_ITERATIONS {
+            sqlx::query(&format!(
+                "UPDATE {}._private_jobs \
+                 SET run_at = NOW() \
+                 WHERE locked_at IS NULL AND attempts < max_attempts",
+                client.schema()
+            ))
+            .execute(client.pool())
+            .await?;
+
+            worker.process_available_jobs().await?;
+
+            // Successful completion deletes the row.
+            let remaining: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
+                .fetch_one(client.pool())
+                .await?;
+            if remaining.0 == 0 {
+                succeeded = true;
+                break;
+            }
+        }
+        assert!(
+            succeeded,
+            "job should have succeeded within {} iterations",
+            MAX_ITERATIONS
+        );
+
+        // Belt-and-suspenders: also confirm it didn't leak into the DLQ on
+        // the way through. (DLQ may not have been initialized — list_dlq_jobs
+        // would error if not. Initialize it first so this assertion is
+        // unconditional.)
+        client.init_dlq().await?;
+        let dlq = client.list_dlq_jobs(DlqFilter::default()).await?;
+        assert_eq!(
+            dlq.jobs.len(),
+            0,
+            "successful job must not appear in DLQ — even one that failed transiently"
+        );
 
         Ok(())
     })
