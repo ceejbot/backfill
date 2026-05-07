@@ -3,8 +3,7 @@
 use std::time::Duration;
 
 use backfill::{
-    BackfillError, IntoTaskHandlerResult, QueueConfig, TaskHandler, WorkerConfig, WorkerContext, WorkerError,
-    WorkerRunner,
+    BackfillError, IntoTaskHandlerResult, TaskHandler, WorkerConfig, WorkerContext, WorkerError, WorkerRunner,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -34,7 +33,7 @@ async fn test_worker_config_default() {
 
     assert_eq!(config.database_url, "postgresql://localhost:5432/backfill");
     assert_eq!(config.schema, "graphile_worker");
-    assert_eq!(config.queue_configs.len(), 1);
+    assert_eq!(config.concurrency, 10);
     assert_eq!(config.poll_interval, Duration::from_millis(200));
     assert_eq!(config.dlq_processor_interval, Some(Duration::from_secs(60)));
 }
@@ -51,8 +50,7 @@ async fn test_worker_config_builder() {
     assert_eq!(config.schema, "custom_schema");
     assert_eq!(config.poll_interval, Duration::from_millis(100));
     assert_eq!(config.dlq_processor_interval, Some(Duration::from_secs(30)));
-    assert_eq!(config.queue_configs.len(), 1);
-    assert_eq!(config.queue_configs[0].concurrency, 10);
+    assert_eq!(config.concurrency, 10);
 }
 
 #[tokio::test]
@@ -60,35 +58,6 @@ async fn test_worker_config_disable_dlq_processor() {
     let config = WorkerConfig::new("postgresql://localhost/test").with_dlq_processor_interval(None);
 
     assert_eq!(config.dlq_processor_interval, None);
-}
-
-#[tokio::test]
-async fn test_queue_config_default_queue() {
-    let config = QueueConfig::default_queue(10);
-
-    assert_eq!(config.name, None);
-    assert_eq!(config.concurrency, 10);
-    assert_eq!(config.priority_range, None);
-}
-
-#[tokio::test]
-#[allow(deprecated)] // documents the deprecated constructor's storage shape
-async fn test_queue_config_named_queue() {
-    let config = QueueConfig::named_queue("bulk", 20);
-
-    assert_eq!(config.name, Some("bulk".to_string()));
-    assert_eq!(config.concurrency, 20);
-    assert_eq!(config.priority_range, None);
-}
-
-#[tokio::test]
-#[allow(deprecated)] // documents the deprecated constructor's storage shape
-async fn test_queue_config_priority_queue() {
-    let config = QueueConfig::priority_queue("urgent", 5, -100, 100);
-
-    assert_eq!(config.name, Some("urgent".to_string()));
-    assert_eq!(config.concurrency, 5);
-    assert_eq!(config.priority_range, Some((-100, 100)));
 }
 
 #[tokio::test]
@@ -146,37 +115,6 @@ async fn test_worker_runner_multiple_job_types() -> Result<(), BackfillError> {
         .await?;
 
     assert_eq!(worker.worker_count(), 1);
-
-    Ok(())
-}
-
-#[tokio::test]
-#[allow(deprecated)] // covers the deprecated multi-queue API while it still exists
-async fn test_worker_runner_with_multiple_queues_only_first_honored() -> Result<(), BackfillError> {
-    // The Vec<QueueConfig> API is deprecated because graphile_worker doesn't
-    // expose per-worker queue filtering; only one Worker is ever spawned and
-    // only the first config's concurrency is used. This test pins that
-    // behaviour: passing 3 configs results in worker_count == 1.
-    let config = WorkerConfig::new(get_test_database_url())
-        .with_schema("test_worker_queues")
-        .with_queues(vec![
-            QueueConfig::default_queue(5),
-            QueueConfig::named_queue("fast", 10),
-            QueueConfig::named_queue("bulk", 3),
-        ])
-        .with_dlq_processor_interval(None);
-
-    let worker = WorkerRunner::builder(config)
-        .await?
-        .define_job::<SimpleTestJob>()
-        .build()
-        .await?;
-
-    assert_eq!(
-        worker.worker_count(),
-        1,
-        "WorkerRunner only ever spawns one Worker, regardless of queue_configs.len()"
-    );
 
     Ok(())
 }

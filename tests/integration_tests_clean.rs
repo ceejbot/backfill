@@ -492,7 +492,7 @@ async fn test_cron_schedule_registration() -> Result<()> {
     let config = WorkerConfig {
         database_url: database_url.clone(),
         schema: schema_name.clone(),
-        queue_configs: vec![],
+        concurrency: 10,
         poll_interval: std::time::Duration::from_millis(1000),
         dlq_processor_interval: None,
         ..Default::default()
@@ -541,7 +541,7 @@ async fn test_multiple_cron_schedules() -> Result<()> {
     let config = WorkerConfig {
         database_url: database_url.clone(),
         schema: schema_name.clone(),
-        queue_configs: vec![],
+        concurrency: 10,
         poll_interval: std::time::Duration::from_millis(1000),
         dlq_processor_interval: None,
         ..Default::default()
@@ -580,7 +580,7 @@ async fn test_cron_with_payload() -> Result<()> {
     let config = WorkerConfig {
         database_url: database_url.clone(),
         schema: schema_name.clone(),
-        queue_configs: vec![],
+        concurrency: 10,
         poll_interval: std::time::Duration::from_millis(1000),
         dlq_processor_interval: None,
         ..Default::default()
