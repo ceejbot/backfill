@@ -642,23 +642,33 @@ impl BackfillClient {
     /// Returns the number of jobs moved to the DLQ.
     pub async fn process_failed_jobs(&self) -> Result<u32, BackfillError> {
         // Find jobs that have failed permanently (attempts >= max_attempts)
-        // and haven't been processed yet
+        // and aren't already in the DLQ.
+        //
+        // NOT EXISTS is preferred over NOT IN here: it scales better at large
+        // DLQ sizes (PostgreSQL can hash-anti-join), and it handles NULL
+        // values in `backfill_dlq.original_job_id` cleanly without the
+        // COALESCE workaround that NOT IN requires (NULL in a NOT IN list
+        // makes the whole predicate UNKNOWN, which silently filters
+        // everything out).
         let find_failed_jobs_query = format!(
             r#"
             SELECT jobs.id, tasks.identifier AS task_identifier,
                    job_queues.queue_name, jobs.priority, jobs.key as job_key,
                    jobs.max_attempts, jobs.attempts, jobs.last_error,
                    jobs.created_at, jobs.run_at, jobs.updated_at, jobs.payload
-            FROM {}._private_jobs AS jobs
-            INNER JOIN {}._private_tasks AS tasks ON tasks.id = jobs.task_id
-            LEFT JOIN {}._private_job_queues AS job_queues ON job_queues.id = jobs.job_queue_id
+            FROM {schema}._private_jobs AS jobs
+            INNER JOIN {schema}._private_tasks AS tasks ON tasks.id = jobs.task_id
+            LEFT JOIN {schema}._private_job_queues AS job_queues ON job_queues.id = jobs.job_queue_id
             WHERE jobs.attempts >= jobs.max_attempts
               AND jobs.max_attempts > 0
-              AND jobs.id NOT IN (SELECT COALESCE(original_job_id, -1) FROM {}.backfill_dlq)
+              AND NOT EXISTS (
+                  SELECT 1 FROM {schema}.backfill_dlq dlq
+                  WHERE dlq.original_job_id = jobs.id
+              )
             ORDER BY jobs.updated_at ASC
             LIMIT 100
         "#,
-            self.schema, self.schema, self.schema, self.schema
+            schema = self.schema
         );
 
         let failed_jobs = sqlx::query(&find_failed_jobs_query).fetch_all(&self.pool).await?;
