@@ -447,6 +447,115 @@ async fn test_multiple_plugins_called_in_order() -> Result<()> {
     .await
 }
 
+/// End-to-end retry-to-exhaustion → DLQ test exercising the actual worker
+/// path (handler runs, graphile_worker reschedules, repeat until
+/// max_attempts hits, DLQ scanner moves the row).
+///
+/// Existing DLQ tests SQL-fake exhaustion via
+/// `UPDATE _private_jobs SET attempts = max_attempts`. This test instead
+/// runs the real worker + real handler + real `fail_job` SQL multiple
+/// times, fast-forwarding `run_at` between iterations to skip the
+/// `exp(attempts)` backoff sleeps that would otherwise slow the test to
+/// minutes. The retry-then-DLQ path through every layer (enqueue, get_job,
+/// handler, fail_job, run_at scheduling, eventual DLQ capture) is what
+/// gets validated.
+#[tokio::test]
+async fn test_retry_to_exhaustion_then_dlq_via_worker() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        // FailJob with should_retry=true returns TemporaryUnavailable
+        // (retryable) on attempts < 3 and ValidationFailed (non-retryable)
+        // on the final attempt. PermanentFailurePlugin only acts on the
+        // JobFail event (will_retry=true), so the retryable failures just
+        // get rescheduled; the final failure fires JobPermanentlyFail
+        // because attempts has reached max_attempts naturally. Net effect:
+        // the job exhausts retries through graphile_worker's normal path.
+        client
+            .enqueue(
+                "fail_job",
+                &FailJob { should_retry: true },
+                JobSpec {
+                    max_attempts: Some(3),
+                    job_key: Some("retry_to_exhaustion_e2e".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let config = WorkerConfig::new(get_test_database_url())
+            .with_schema(client.schema().to_string())
+            .with_poll_interval(Duration::from_millis(50));
+        let worker = WorkerRunner::builder(config)
+            .await?
+            .define_job::<FailJob>()
+            .build()
+            .await?;
+
+        // Run the worker repeatedly. After each iteration the failed job's
+        // `run_at` has been pushed forward by `exp(attempts)` seconds (1s,
+        // ~3s, ~7s, …). Force it back to NOW() so the next process_available_jobs()
+        // can pick it up immediately. Bounded loop so a regression that
+        // breaks the retry path doesn't hang the test forever.
+        const MAX_ITERATIONS: usize = 10;
+        let mut exhausted = false;
+        for _ in 0..MAX_ITERATIONS {
+            sqlx::query(&format!(
+                "UPDATE {}._private_jobs \
+                 SET run_at = NOW() \
+                 WHERE locked_at IS NULL AND attempts < max_attempts",
+                client.schema()
+            ))
+            .execute(client.pool())
+            .await?;
+
+            worker.process_available_jobs().await?;
+
+            // Check if attempts hit max_attempts.
+            let row: Option<(i16, i16)> = sqlx::query_as(&format!(
+                "SELECT attempts, max_attempts FROM {}._private_jobs LIMIT 1",
+                client.schema()
+            ))
+            .fetch_optional(client.pool())
+            .await?;
+            if let Some((attempts, max_attempts)) = row
+                && attempts >= max_attempts
+                && max_attempts > 0
+            {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(
+            exhausted,
+            "Worker should have exhausted retries within {} iterations",
+            MAX_ITERATIONS
+        );
+
+        // Now run the DLQ processor. The job should be captured.
+        let moved = client.process_failed_jobs().await?;
+        assert_eq!(moved, 1, "exhausted job should move to DLQ on next process_failed_jobs");
+
+        let dlq = client.list_dlq_jobs(DlqFilter::default()).await?;
+        assert_eq!(dlq.jobs.len(), 1);
+        assert_eq!(dlq.jobs[0].task_identifier, "fail_job");
+        assert_eq!(dlq.jobs[0].job_key.as_deref(), Some("retry_to_exhaustion_e2e"));
+        // `failure_count` is the touch counter (P2-7) — one DLQ touch.
+        assert_eq!(dlq.jobs[0].failure_count, 1);
+
+        // The original job row should be gone from _private_jobs (the DLQ
+        // move's atomic CTE deleted it — P1-2).
+        let count: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {}._private_jobs",
+            client.schema()
+        ))
+        .fetch_one(client.pool())
+        .await?;
+        assert_eq!(count.0, 0, "_private_jobs should be empty after DLQ move");
+
+        Ok(())
+    })
+    .await
+}
+
 /// Regression test for P0-3: non-retryable `WorkerError` variants must
 /// short-circuit retries instead of running all the way up to `max_attempts`.
 ///
