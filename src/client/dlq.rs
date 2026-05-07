@@ -322,6 +322,18 @@ impl BackfillClient {
     }
 
     /// Requeue a job from the DLQ back to the main queue.
+    ///
+    /// Two SQL operations happen back-to-back:
+    /// 1. Enqueue the job (via `WorkerUtils::add_raw_job`).
+    /// 2. UPDATE the DLQ row's `requeued_count`, `last_requeued_at`, `notes`.
+    ///
+    /// `WorkerUtils::add_raw_job` hard-codes the pool, so we can't bundle
+    /// these into a single transaction. To prefer truthful return values,
+    /// step 2 failures are logged at WARN level rather than failing the
+    /// operation: a successful enqueue followed by a failed bookkeeping
+    /// UPDATE returns `Ok(job)` (the job IS in the queue) with a stale
+    /// `requeued_count` in the DLQ admin view. The next refresh of the row
+    /// will show the discrepancy if it matters.
     pub async fn requeue_dlq_job(&self, dlq_id: i64, notes: Option<String>) -> Result<Job, BackfillError> {
         // Get the DLQ job
         let dlq_job = self
@@ -384,11 +396,24 @@ impl BackfillClient {
             self.schema
         );
 
-        sqlx::query(&update_query)
+        // Bookkeeping update — see function docstring. If this fails, the
+        // job has already been re-enqueued; we return success but log so an
+        // operator can see that the DLQ row's counters didn't advance.
+        if let Err(e) = sqlx::query(&update_query)
             .bind(&notes)
             .bind(dlq_id)
             .execute(&self.pool)
-            .await?;
+            .await
+        {
+            log::warn!(
+                "DLQ row bookkeeping update failed after successful requeue \
+                 (dlq_id: {}, job_id: {}, error: {}); requeued_count/last_requeued_at \
+                 may be stale",
+                dlq_id,
+                job.id(),
+                e
+            );
+        }
 
         Ok(*job)
     }
@@ -652,14 +677,26 @@ impl BackfillClient {
             // Convert last_error from TEXT to JSONB for DLQ table
             let last_error_json = last_error.map(serde_json::Value::String);
 
-            // Move to DLQ using UPSERT to handle requeued jobs that fail again
-            let upsert_dlq_query = format!(
+            // Atomic DELETE + UPSERT in a single statement using a writable
+            // CTE. Either the row is gone from `_private_jobs` AND in
+            // `backfill_dlq`, or neither happened — no partial-failure window
+            // where the job ends up in both tables. The INSERT's SELECT
+            // sources from `deleted`, so when DELETE finds nothing
+            // (e.g., another worker already moved the row) the INSERT runs
+            // zero times.
+            let move_query = format!(
                 r#"
+                WITH deleted AS (
+                    DELETE FROM {schema}._private_jobs WHERE id = $1 RETURNING 1
+                )
                 INSERT INTO {schema}.backfill_dlq (
                     original_job_id, task_identifier, payload, queue_name, priority,
                     job_key, max_attempts, failure_reason, failure_count, last_error,
                     original_created_at, original_run_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                )
+                SELECT $1::bigint, $2::text, $3::jsonb, $4::text, $5::int, $6::text,
+                       $7::int, $8::text, $9::int, $10::jsonb, $11::timestamptz, $12::timestamptz
+                FROM deleted
                 ON CONFLICT (job_key) WHERE job_key IS NOT NULL DO UPDATE SET
                     failed_at = NOW(),
                     failure_count = {schema}.backfill_dlq.failure_count + EXCLUDED.failure_count,
@@ -672,12 +709,12 @@ impl BackfillClient {
 
             let failure_reason = format!("Job exceeded maximum retry attempts ({}/{})", attempts, max_attempts);
 
-            let upsert_result = sqlx::query(&upsert_dlq_query)
+            let move_result = sqlx::query(&move_query)
                 .bind(job_id)
                 .bind(&task_identifier)
                 .bind(&payload)
                 .bind(&queue_name)
-                .bind(priority)
+                .bind(priority as i32)
                 .bind(&job_key)
                 .bind(max_attempts as i32)
                 .bind(failure_reason)
@@ -688,36 +725,30 @@ impl BackfillClient {
                 .execute(&self.pool)
                 .await;
 
-            match upsert_result {
+            match move_result {
+                Ok(result) if result.rows_affected() > 0 => {
+                    moved_count += 1;
+                    log::info!(
+                        "Successfully moved failed job to DLQ (job_id: {}, task: {}, attempts: {}/{})",
+                        job_id,
+                        task_identifier,
+                        attempts,
+                        max_attempts
+                    );
+                }
                 Ok(_) => {
-                    // Successfully moved to DLQ, now remove from main jobs table
-                    let delete_query = format!("DELETE FROM {}._private_jobs WHERE id = $1", self.schema);
-                    match sqlx::query(&delete_query).bind(job_id).execute(&self.pool).await {
-                        Ok(_) => {
-                            moved_count += 1;
-                            log::info!(
-                                "Successfully moved failed job to DLQ (job_id: {}, task: {}, attempts: {}/{})",
-                                job_id,
-                                task_identifier,
-                                attempts,
-                                max_attempts
-                            );
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "Failed to delete job from main table after DLQ insertion (job_id: {}, task: {}, error: {})",
-                                job_id,
-                                task_identifier,
-                                e
-                            );
-                            // Consider this a partial failure - job is in DLQ
-                            // but also still in main table
-                        }
-                    }
+                    // DELETE found no row — likely another worker beat us to
+                    // it. Not a problem; the job either already reached DLQ
+                    // via the other worker or is still progressing normally.
+                    log::debug!(
+                        "DLQ move skipped (job_id: {}, task: {}); row no longer present in _private_jobs",
+                        job_id,
+                        task_identifier
+                    );
                 }
                 Err(e) => {
                     log::error!(
-                        "Failed to insert job into DLQ (job_id: {}, task: {}, error: {})",
+                        "Failed to move job to DLQ (job_id: {}, task: {}, error: {})",
                         job_id,
                         task_identifier,
                         e
