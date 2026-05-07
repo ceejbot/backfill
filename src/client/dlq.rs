@@ -421,24 +421,24 @@ impl BackfillClient {
 
     /// Delete a job from the DLQ permanently.
     pub async fn delete_dlq_job(&self, dlq_id: i64) -> Result<bool, BackfillError> {
-        // Get the job first to record task identifier in metrics
-        let task_identifier = if let Some(job) = self.get_dlq_job(dlq_id).await? {
-            Some(job.task_identifier.clone())
-        } else {
-            None
-        };
+        // Single round-trip: DELETE … RETURNING gives us the task_identifier
+        // for the metric in the same query. Returns None if the row didn't
+        // exist (no rows deleted).
+        let query = format!(
+            "DELETE FROM {}.backfill_dlq WHERE id = $1 RETURNING task_identifier",
+            self.schema
+        );
+        let task_identifier: Option<String> = sqlx::query_scalar(&query)
+            .bind(dlq_id)
+            .fetch_optional(&self.pool)
+            .await?;
 
-        let query = format!("DELETE FROM {}.backfill_dlq WHERE id = $1", self.schema);
-        let result = sqlx::query(&query).bind(dlq_id).execute(&self.pool).await?;
-
-        let deleted = result.rows_affected() > 0;
-
-        if deleted && let Some(task) = task_identifier {
-            crate::metrics::record_dlq_job_deleted(&task);
+        if let Some(task) = &task_identifier {
+            crate::metrics::record_dlq_job_deleted(task);
             log::info!("Job deleted from DLQ (dlq_id: {}, task: {})", dlq_id, task);
         }
 
-        Ok(deleted)
+        Ok(task_identifier.is_some())
     }
 
     /// Delete DLQ entries by job_key.

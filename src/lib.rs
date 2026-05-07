@@ -541,9 +541,11 @@ pub async fn enqueue_emergency<T>(
 where
     T: Serialize,
 {
+    // run_at defaults to None, which graphile_worker resolves to NOW() at the
+    // SQL layer — equivalent to "execute immediately" without the extra Rust-
+    // side clock read.
     let spec = JobSpec {
         priority: Priority::EMERGENCY,
-        run_at: Some(Utc::now()), // Execute immediately
         job_key,
         ..Default::default()
     };
