@@ -248,14 +248,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         outcome.expect("outcome should contain a job").id()
     );
 
-    // Enqueue a job with custom retry policy
-    let custom_retry_policy = RetryPolicy::new(
-        6,                                     // 6 attempts
-        std::time::Duration::from_millis(500), // Start with 500ms
-        std::time::Duration::from_secs(60),    // Cap at 1 minute
-        1.8,                                   // 1.8x multiplier
-    )
-    .with_jitter(0.2); // 20% jitter
+    // Enqueue a job with custom retry settings.
+    // Note: only `max_attempts` affects runtime behaviour. graphile_worker
+    // schedules retries via a fixed `exp(min(attempts, 10))` second formula,
+    // so the timing fields on RetryPolicy are not honored. See the docs on
+    // `RetryPolicy` for the full story.
+    let custom_retry_policy = RetryPolicy {
+        max_attempts: 6,
+        ..Default::default()
+    };
 
     let custom_job = GenerateReportJob {
         report_type: "analytics_summary".to_string(),

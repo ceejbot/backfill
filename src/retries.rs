@@ -1,19 +1,53 @@
-//! Retries: policy, implementation, and tests.
+//! Retry policy.
+//!
+//! # ⚠️ Important: backoff timing is fixed, not configurable
+//!
+//! `RetryPolicy` exposes `initial_delay`, `max_delay`, `backoff_multiplier`,
+//! and `jitter_factor` fields, but **graphile_worker does not honor them**.
+//! graphile_worker schedules every retry on a hard-coded SQL formula:
+//!
+//! ```text
+//! run_at = greatest(now(), run_at) + (exp(least(attempts, 10)) * interval '1 second')
+//! ```
+//!
+//! Concretely: ~1s after the 1st failure, ~2.7s after the 2nd, ~7.4s after
+//! the 3rd, ~20s, ~55s, ~2.5min, ~6.7min, ~18min, ~49min, ~2.2h, ~6h (capped
+//! at attempts ≥ 10). This formula applies to every job regardless of which
+//! `RetryPolicy` the caller configured.
+//!
+//! **The only `RetryPolicy` field that actually affects job behaviour is
+//! `max_attempts`**, which is forwarded to graphile_worker's `JobSpec`.
+//! Methods that compute delays (`calculate_delay`, `calculate_retry_time`,
+//! `with_jitter`) are deprecated — they were dead code masquerading as
+//! configuration. The `fast()`, `aggressive()`, and `conservative()` presets
+//! are kept for compatibility but in practice differ only in attempt count.
+//!
+//! Per-job backoff customisation requires upstream support in
+//! `graphile_worker` and is not currently available.
 
 use std::time::Duration;
 
-/// Configuration for exponential backoff retry policy.
+/// Configuration for retry behaviour.
+///
+/// **Only `max_attempts` affects runtime behaviour.** The other fields are
+/// retained for source-compatibility but graphile_worker computes retry
+/// timing from a fixed SQL formula (`exp(min(attempts, 10))` seconds) — see
+/// the module-level docs for details.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
-    /// Maximum number of retry attempts
+    /// Maximum number of retry attempts. **Honored at runtime.**
     pub max_attempts: i32,
-    /// Initial delay between retries
+    /// Initial delay between retries. **NOT honored** — graphile_worker uses
+    /// `exp(min(attempts, 10))` seconds regardless.
     pub initial_delay: Duration,
-    /// Maximum delay between retries
+    /// Maximum delay between retries. **NOT honored** — graphile_worker's
+    /// formula caps naturally at attempts ≥ 10 (~6 hours).
     pub max_delay: Duration,
-    /// Backoff multiplier (typically 2.0 for exponential backoff)
+    /// Backoff multiplier. **NOT honored** — graphile_worker's formula uses
+    /// `exp()`, not a configurable multiplier.
     pub backoff_multiplier: f64,
-    /// Add jitter to prevent thundering herd (0.0 to 1.0, default 0.1)
+    /// Jitter factor. **NOT honored** — graphile_worker's formula adds no
+    /// jitter.
     pub jitter_factor: f64,
 }
 
@@ -30,7 +64,17 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Create a new RetryPolicy with custom settings
+    /// Create a new RetryPolicy with custom settings.
+    ///
+    /// **Note:** Only `max_attempts` affects runtime behaviour. The other
+    /// arguments are stored on the returned policy but never reach
+    /// graphile_worker. See the module-level docs.
+    #[deprecated(
+        since = "1.2.0",
+        note = "graphile_worker honors only max_attempts; the timing arguments are dead config. \
+                Construct directly with RetryPolicy { max_attempts: n, ..Default::default() } \
+                or use a preset like RetryPolicy::fast()."
+    )]
     pub fn new(max_attempts: i32, initial_delay: Duration, max_delay: Duration, backoff_multiplier: f64) -> Self {
         Self {
             max_attempts,
@@ -41,13 +85,26 @@ impl RetryPolicy {
         }
     }
 
-    /// Create a RetryPolicy with jitter configuration
+    /// Configure jitter on this policy. **Not applied at runtime.**
+    #[deprecated(
+        since = "1.2.0",
+        note = "jitter_factor is not honored by graphile_worker; this method has no runtime effect."
+    )]
     pub fn with_jitter(mut self, jitter_factor: f64) -> Self {
         self.jitter_factor = jitter_factor.clamp(0.0, 1.0);
         self
     }
 
-    /// Calculate the delay for a specific attempt number (0-based)
+    /// Calculate what the delay *would* be for a given attempt number under
+    /// this policy.
+    ///
+    /// **Not used at runtime.** graphile_worker schedules retries via a
+    /// fixed SQL formula and ignores this calculation. Retained as a
+    /// utility for tests and future use.
+    #[deprecated(
+        since = "1.2.0",
+        note = "graphile_worker computes retry timing in SQL and ignores this method. Returns a value but has no runtime effect."
+    )]
     pub fn calculate_delay(&self, attempt: i32) -> Duration {
         if attempt >= self.max_attempts {
             return Duration::ZERO;
@@ -81,12 +138,20 @@ impl RetryPolicy {
         Duration::from_millis(final_delay_ms as u64)
     }
 
-    /// Calculate the run_at time for a retry
+    /// Calculate what the run_at time *would* be for a retry under this
+    /// policy.
+    ///
+    /// **Not used at runtime.** See [`RetryPolicy::calculate_delay`].
+    #[deprecated(
+        since = "1.2.0",
+        note = "graphile_worker computes retry timing in SQL and ignores this method. Returns a value but has no runtime effect."
+    )]
     pub fn calculate_retry_time(
         &self,
         attempt: i32,
         base_time: chrono::DateTime<chrono::Utc>,
     ) -> chrono::DateTime<chrono::Utc> {
+        #[allow(deprecated)]
         let delay = self.calculate_delay(attempt);
         base_time + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::MAX)
     }
@@ -101,7 +166,11 @@ impl RetryPolicy {
         self.max_attempts + 1 // +1 for the initial attempt
     }
 
-    /// Create a fast retry policy for high-priority jobs
+    /// Preset for high-priority jobs that need quick turnaround.
+    ///
+    /// `max_attempts = 3`. Other fields are stored but not honored — see the
+    /// module-level docs. In practice this preset differs from `aggressive()`
+    /// and `conservative()` only in attempt count.
     pub fn fast() -> Self {
         Self {
             max_attempts: 3,
@@ -112,23 +181,29 @@ impl RetryPolicy {
         }
     }
 
-    /// Create an aggressive retry policy for critical jobs
+    /// Preset for critical jobs that should keep retrying for a long time.
+    ///
+    /// `max_attempts = 12` — graphile_worker's exponential backoff caps at
+    /// ~6h per retry once attempts ≥ 10, so this gives roughly half a day of
+    /// retry coverage. Other fields are stored but not honored.
     pub fn aggressive() -> Self {
         Self {
             max_attempts: 12,
             initial_delay: Duration::from_millis(500),
-            max_delay: Duration::from_secs(600), // 10 minutes
+            max_delay: Duration::from_secs(600),
             backoff_multiplier: 1.5,
             jitter_factor: 0.15,
         }
     }
 
-    /// Create a conservative retry policy for bulk jobs
+    /// Preset for bulk jobs where consistency matters more than latency.
+    ///
+    /// `max_attempts = 5`. Other fields are stored but not honored.
     pub fn conservative() -> Self {
         Self {
             max_attempts: 5,
             initial_delay: Duration::from_secs(5),
-            max_delay: Duration::from_secs(1800), // 30 minutes
+            max_delay: Duration::from_secs(1800),
             backoff_multiplier: 2.5,
             jitter_factor: 0.2,
         }
@@ -136,6 +211,7 @@ impl RetryPolicy {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests still exercise the deprecated math helpers
 mod tests {
     use super::*;
     use crate::JobSpec;

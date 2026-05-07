@@ -9,8 +9,14 @@
 //! - **Parallel execution** by default - jobs run concurrently across all
 //!   workers
 //! - **Serial queues** when you need ordering or rate limiting
-//! - **Exponential backoff** with jitter to prevent thundering herds
-//! - **Flexible retry policies** (fast, aggressive, conservative, or custom)
+//! - **Exponential backoff retries** via graphile_worker (timing is
+//!   `exp(min(attempts, 10))` seconds; fixed, not per-job tunable — see
+//!   [`RetryPolicy`])
+//! - **Configurable max-attempts per job** with `fast`, `aggressive`, and
+//!   `conservative` presets
+//! - **Permanent-failure short-circuit** — non-retryable `WorkerError`
+//!   variants land in the DLQ on the first failure instead of waiting for
+//!   `max_attempts` to exhaust
 //! - **Dead letter queue** handling for failed jobs
 //! - **Type-safe job handlers** using Rust's type system
 //! - **Low-latency execution** via PostgreSQL LISTEN/NOTIFY
@@ -362,14 +368,22 @@ impl Default for JobSpec {
 }
 
 impl JobSpec {
-    /// Create a JobSpec with exponential backoff retry policy
+    /// Attach a [`RetryPolicy`] to this JobSpec.
+    ///
+    /// Sets `max_attempts` from the policy. Note that backoff timing fields
+    /// on the policy are stored but not honored at runtime — see
+    /// [`RetryPolicy`].
     pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.max_attempts = Some(retry_policy.max_attempts);
         self.retry_policy = Some(retry_policy);
         self
     }
 
-    /// Create a JobSpec optimized for fast retries
+    /// Configure for the `fast` preset: `max_attempts = 3`.
+    ///
+    /// In practice this differs from [`with_aggressive_retries`] and
+    /// [`with_conservative_retries`] only in the attempt count — see
+    /// [`RetryPolicy`].
     pub fn with_fast_retries(mut self) -> Self {
         let policy = RetryPolicy::fast();
         self.max_attempts = Some(policy.max_attempts);
@@ -377,7 +391,10 @@ impl JobSpec {
         self
     }
 
-    /// Create a JobSpec optimized for aggressive retries
+    /// Configure for the `aggressive` preset: `max_attempts = 12`.
+    ///
+    /// At graphile_worker's fixed exp-backoff schedule, 12 attempts gives
+    /// roughly half a day of cumulative retry coverage before DLQ.
     pub fn with_aggressive_retries(mut self) -> Self {
         let policy = RetryPolicy::aggressive();
         self.max_attempts = Some(policy.max_attempts);
@@ -385,7 +402,7 @@ impl JobSpec {
         self
     }
 
-    /// Create a JobSpec optimized for conservative retries
+    /// Configure for the `conservative` preset: `max_attempts = 5`.
     pub fn with_conservative_retries(mut self) -> Self {
         let policy = RetryPolicy::conservative();
         self.max_attempts = Some(policy.max_attempts);
@@ -393,15 +410,28 @@ impl JobSpec {
         self
     }
 
-    /// Get the effective retry policy (returns default if none specified)
+    /// Get the effective retry policy (returns default if none specified).
+    ///
+    /// **Note:** Only `max_attempts` from the returned policy reaches
+    /// graphile_worker. See [`RetryPolicy`] for details.
     pub fn effective_retry_policy(&self) -> RetryPolicy {
         self.retry_policy.clone().unwrap_or_default()
     }
 
-    /// Calculate the next retry time for a failed job
+    /// Calculate what the next retry time *would* be under this spec's
+    /// policy.
+    ///
+    /// **Not used at runtime.** graphile_worker schedules retries via a
+    /// fixed SQL formula. This method is preserved as a utility but has no
+    /// effect on actual job behaviour.
+    #[deprecated(
+        since = "1.2.0",
+        note = "graphile_worker computes retry timing in SQL and ignores this method. Returns a value but has no runtime effect."
+    )]
     pub fn calculate_retry_time(&self, attempt: i32, failed_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let policy = self.effective_retry_policy();
         if policy.should_retry(attempt) {
+            #[allow(deprecated)]
             Some(policy.calculate_retry_time(attempt, failed_at))
         } else {
             None // No more retries
@@ -504,10 +534,12 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a high-priority job with fast exponential backoff retries.
+/// Enqueue a high-priority job configured for a low retry count (3 attempts).
 ///
-/// Best for high-priority jobs that need quick retries (3 attempts, 100ms-30s
-/// delays).
+/// Use for jobs where rapid failure-to-DLQ is preferred over many retries.
+/// graphile_worker's retry timing is fixed at `exp(min(attempts, 10))` seconds
+/// regardless of policy — see [`RetryPolicy`] — so the only difference between
+/// this and other `_with_retries` helpers is the attempt cap.
 pub async fn enqueue_fast_with_retries<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -527,9 +559,12 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a critical job with aggressive exponential backoff retries.
+/// Enqueue a critical job with a high retry count (12 attempts).
 ///
-/// Best for critical jobs that must succeed (12 attempts, up to 4 hour delays).
+/// Use for jobs that must eventually succeed if at all possible. graphile_worker
+/// retries on a fixed `exp(min(attempts, 10))` second schedule, capping at
+/// ~6h per retry — so 12 attempts gives roughly half a day of total retry
+/// coverage. See [`RetryPolicy`] for the full timing.
 pub async fn enqueue_critical<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -549,10 +584,13 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a bulk job with conservative exponential backoff retries.
+/// Enqueue a bulk job with a moderate retry count (5 attempts via the
+/// `conservative` preset).
 ///
-/// Best for background jobs where consistency matters more than speed
-/// (8 attempts, 1 min - 8 hour delays).
+/// Use for background jobs that should be retried but where you don't want
+/// many attempts. graphile_worker's retry timing is `exp(min(attempts, 10))`
+/// seconds — see [`RetryPolicy`] — so this gives roughly 1s, 3s, 7s, 20s,
+/// 55s before the job lands in DLQ.
 pub async fn enqueue_bulk_with_retries<T>(
     client: &BackfillClient,
     task_identifier: &str,
