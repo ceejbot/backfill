@@ -783,14 +783,17 @@ impl BackfillClient {
 
     /// Process failed jobs continuously in a background task.
     ///
-    /// This spawns a background task that periodically scans for failed jobs
-    /// and moves them to the DLQ. The task runs until the provided cancellation
-    /// token is triggered.
+    /// Spawns a background task that periodically scans for failed jobs and
+    /// moves them to the DLQ. Runs until the cancellation token is triggered.
+    ///
+    /// On consecutive errors the wait between scans grows exponentially —
+    /// `interval`, `2*interval`, `4*interval`, … capped at `32*interval` —
+    /// so a transient outage doesn't produce log spam at fixed cadence.
+    /// On any successful scan the wait resets to `interval`.
     ///
     /// # Arguments
-    /// * `interval` - How often to scan for failed jobs
-    /// * `cancellation_token` - Token to signal when to stop the background
-    ///   task
+    /// * `interval` - How often to scan for failed jobs (steady state)
+    /// * `cancellation_token` - Signals when to stop the background task
     ///
     /// # Returns
     /// A JoinHandle for the background task
@@ -799,36 +802,56 @@ impl BackfillClient {
         interval: std::time::Duration,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
+        // 2^5 = 32x interval cap. With the default 60s interval that's ~32min
+        // between attempts under sustained failure, which is far enough apart
+        // to be quiet but close enough to still recover quickly when the
+        // underlying issue clears.
+        const MAX_BACKOFF_SHIFT: u32 = 5;
+
         let client = self.clone();
 
         tokio::spawn(async move {
-            let mut interval_timer = tokio::time::interval(interval);
-            interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
             log::info!(
                 "Starting DLQ processor background task (interval_seconds: {})",
                 interval.as_secs()
             );
 
+            let mut consecutive_errors: u32 = 0;
+
             loop {
+                // Run the scan first (immediate on first iteration, then after
+                // each subsequent wait — matches the prior tokio::interval
+                // behaviour where the first tick fires at t=0).
+                let mut next_wait = interval;
+                match client.process_failed_jobs().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            log::info!("DLQ processor moved failed jobs (moved_jobs: {})", count);
+                        }
+                        consecutive_errors = 0;
+                    }
+                    Err(e) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                        let shift = consecutive_errors.min(MAX_BACKOFF_SHIFT);
+                        let factor = 1u32 << shift;
+                        next_wait = interval * factor;
+                        log::error!(
+                            "DLQ processor encountered error (consecutive: {}, next attempt in: {:?}): {}",
+                            consecutive_errors,
+                            next_wait,
+                            e
+                        );
+                    }
+                }
+
+                // Wait or shut down. Cancellation always wins ties.
                 tokio::select! {
+                    biased;
                     _ = cancellation_token.cancelled() => {
                         log::info!("DLQ processor shutting down");
                         break;
                     }
-                    _ = interval_timer.tick() => {
-                        match client.process_failed_jobs().await {
-                            Ok(count) if count > 0 => {
-                                log::info!("DLQ processor moved failed jobs (moved_jobs: {})", count);
-                            }
-                            Ok(_) => {
-                                // No jobs moved, no need to log
-                            }
-                            Err(e) => {
-                                log::error!("DLQ processor encountered error: {}", e);
-                            }
-                        }
-                    }
+                    _ = tokio::time::sleep(next_wait) => {}
                 }
             }
         })
