@@ -281,17 +281,45 @@ impl Queue {
 
 /// Outcome of an enqueue operation.
 ///
-/// When enqueueing a job, the result can either be:
-/// - `Enqueued(Job)`: The job was successfully created or updated
-/// - `AlreadyInProgress { job_key }`: A job with this key is currently locked
-///   by a worker
+/// `enqueue` returns `Result<EnqueueOutcome, _>`. This enum distinguishes
+/// the two non-error outcomes:
+///
+/// - [`EnqueueOutcome::Enqueued`] — the job was created (or, with
+///   `JobKeyMode::Replace`, updated). The boxed `Job` carries the job's
+///   id/queue_id/etc.
+/// - [`EnqueueOutcome::AlreadyInProgress`] — a job with the same `job_key`
+///   was **currently locked by a worker** when we tried to add this one.
+///   This is *not* a duplicate-key collision (that's handled by
+///   `job_key_mode`); it's a race where the worker grabbed the existing
+///   job before our update could land. The new payload was discarded.
+///
+/// # ⚠️ Footgun warning
+///
+/// Treating every `Ok(_)` return as "the job is enqueued" is wrong. A
+/// caller who writes:
+///
+/// ```ignore
+/// // BUG: silently drops AlreadyInProgress as if it were success
+/// let job_id = client.enqueue(...).await?.unwrap().id();
+/// ```
+///
+/// will panic at runtime any time the race fires. Always pattern-match,
+/// or use [`EnqueueOutcome::is_already_in_progress`] / [`EnqueueOutcome::job`]
+/// to handle the case explicitly. `.unwrap()` and `.expect()` panic on
+/// `AlreadyInProgress` by design — they're only safe when you're certain
+/// no worker is holding the key.
 #[derive(Debug, Clone)]
 pub enum EnqueueOutcome {
-    /// Job was successfully enqueued (either created or updated)
+    /// Job was successfully enqueued (either created or updated).
     Enqueued(Box<Job>),
     /// A job with this key is already in progress (locked by a worker).
-    /// Contains the job_key that was in conflict.
-    AlreadyInProgress { job_key: String },
+    /// The new payload was **not** stored — your update is lost. Decide in
+    /// the caller whether to retry, queue a different job, or accept the
+    /// drop.
+    AlreadyInProgress {
+        /// The job_key that conflicted.
+        job_key: String,
+    },
 }
 
 impl EnqueueOutcome {

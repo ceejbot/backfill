@@ -141,22 +141,18 @@ When workers crash without graceful shutdown, they can leave locks behind that p
 
 **⚠️ Warning:** Setting `stale_job_lock_timeout` too short can cause duplicate job execution if jobs legitimately run longer than the timeout. This can lead to data corruption.
 
-### SQLx Compile-Time Query Verification
+### SQLx usage
 
-This library uses SQLx's compile-time query verification for production safety. Set `DATABASE_URL` during compilation to enable type-safe, compile-time checked SQL queries:
+Backfill currently uses runtime SQLx queries (`sqlx::query()` /
+`sqlx::query_scalar()`) rather than the compile-time-checked
+`sqlx::query!()` / `query_as!()` macros. No `DATABASE_URL` is required at
+compile time, and there's no `.sqlx/` metadata cache to maintain. Schema
+errors surface at runtime (caught by the integration test suite).
 
-```bash
-export DATABASE_URL="postgresql://localhost:5432/backfill"
-cargo build  # Queries verified against actual database schema
-```
-
-Alternatively, use offline mode with pre-generated query metadata:
-```bash
-cargo sqlx prepare  # Generates .sqlx/sqlx-data.json
-cargo build         # Uses cached metadata, no database required
-```
-
-See [Database Setup](docs/01-database-setup.md#sqlx-compile-time-query-verification) for detailed setup instructions and best practices.
+If you write your own SQLx queries against backfill's tables in *your*
+application, the compile-time macros are a great fit — see
+[Database Setup](docs/01-database-setup.md) for `cargo sqlx prepare`
+guidance.
 
 ### Automatic Setup
 
