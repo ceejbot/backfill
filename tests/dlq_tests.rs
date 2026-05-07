@@ -704,6 +704,91 @@ async fn test_dlq_with_different_priorities() {
     assert!(priorities.contains(&5)); // BULK_LOW
 }
 
+/// Regression test for P1-1: `list_dlq_jobs.total` must reflect the filtered
+/// row count, not the unfiltered table size.
+///
+/// Before the fix, the count query was an unconditional `SELECT COUNT(*) FROM
+/// backfill_dlq` so any paginated admin UI that filtered (by task/queue/time)
+/// computed wrong page counts. The list query honored filters; only the total
+/// didn't.
+#[tokio::test]
+async fn test_list_dlq_jobs_total_respects_filters() {
+    let client = setup_test_client("dlq_total_filtered").await;
+    client.init_dlq().await.expect("DLQ init");
+
+    let test_job = TestJob {
+        message: "filter total test".to_string(),
+        number: 1,
+    };
+
+    // Stage 5 jobs with task "task_a" and 3 with task "task_b" — 8 total.
+    for _ in 0..5 {
+        let outcome = client
+            .enqueue("task_a", &test_job, JobSpec::default())
+            .await
+            .expect("enqueue task_a");
+        client
+            .add_to_dlq(&outcome.unwrap(), "task_a failure", None)
+            .await
+            .expect("add task_a to DLQ");
+    }
+    for _ in 0..3 {
+        let outcome = client
+            .enqueue("task_b", &test_job, JobSpec::default())
+            .await
+            .expect("enqueue task_b");
+        client
+            .add_to_dlq(&outcome.unwrap(), "task_b failure", None)
+            .await
+            .expect("add task_b to DLQ");
+    }
+
+    // Unfiltered: total = 8.
+    let all = client
+        .list_dlq_jobs(DlqFilter::default())
+        .await
+        .expect("list all");
+    assert_eq!(all.total, 8);
+
+    // Filter by task_a — must report 5, not 8.
+    let only_a = client
+        .list_dlq_jobs(DlqFilter {
+            task_identifier: Some("task_a".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("list task_a");
+    assert_eq!(
+        only_a.total, 5,
+        "filtered total must reflect the filter, not the whole table"
+    );
+    assert_eq!(only_a.jobs.len(), 5);
+
+    // Filter by task_b — must report 3, not 8.
+    let only_b = client
+        .list_dlq_jobs(DlqFilter {
+            task_identifier: Some("task_b".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("list task_b");
+    assert_eq!(only_b.total, 3);
+    assert_eq!(only_b.jobs.len(), 3);
+
+    // Combine filter + pagination: total reflects filter, jobs reflect page.
+    let page_a = client
+        .list_dlq_jobs(DlqFilter {
+            task_identifier: Some("task_a".to_string()),
+            limit: Some(2),
+            offset: Some(0),
+            ..Default::default()
+        })
+        .await
+        .expect("list task_a paginated");
+    assert_eq!(page_a.total, 5, "total must ignore LIMIT/OFFSET");
+    assert_eq!(page_a.jobs.len(), 2);
+}
+
 /// Regression test for the DLQ-vs-cleanup startup race (P0-1).
 ///
 /// Before the fix, `WorkerRunner::run_until_cancelled` called

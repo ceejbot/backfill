@@ -248,9 +248,25 @@ impl BackfillClient {
             crate::metrics::record_dlq_age(&job.task_identifier, age_seconds);
         }
 
-        // Get total count for pagination (simplified - could be optimized)
-        let count_query = format!("SELECT COUNT(*) FROM {}.backfill_dlq", self.schema);
-        let total: i64 = sqlx::query_scalar(&count_query).fetch_one(&self.pool).await?;
+        // Get total count for pagination, applying the same filters as the list
+        // query. Without this, paging UIs that filter (e.g., by task) compute
+        // wrong page counts because `total` would reflect every DLQ row, not
+        // the filtered subset.
+        let mut count_builder = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM ");
+        count_builder.push(&self.schema).push(".backfill_dlq WHERE 1=1");
+        if let Some(task) = &filter.task_identifier {
+            count_builder.push(" AND task_identifier = ").push_bind(task);
+        }
+        if let Some(queue) = &filter.queue_name {
+            count_builder.push(" AND queue_name = ").push_bind(queue);
+        }
+        if let Some(from) = filter.failed_after {
+            count_builder.push(" AND failed_at >= ").push_bind(from);
+        }
+        if let Some(to) = filter.failed_before {
+            count_builder.push(" AND failed_at <= ").push_bind(to);
+        }
+        let total: i64 = count_builder.build_query_scalar().fetch_one(&self.pool).await?;
 
         Ok(DlqJobList {
             jobs,
