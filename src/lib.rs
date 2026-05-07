@@ -113,6 +113,7 @@ use serde::Serialize;
 mod client;
 mod dlq_cleanup_plugin;
 mod errors;
+mod permanent_failure_plugin;
 mod priorities;
 mod retries;
 mod worker;
@@ -128,6 +129,7 @@ pub use client::cleanup::{
 pub use client::*;
 pub use dlq_cleanup_plugin::DlqCleanupPlugin;
 pub use errors::{BackfillError, WorkerError};
+pub use permanent_failure_plugin::PermanentFailurePlugin;
 pub use priorities::*;
 pub use retries::*;
 pub use worker::*;

@@ -447,6 +447,138 @@ async fn test_multiple_plugins_called_in_order() -> Result<()> {
     .await
 }
 
+/// Regression test for P0-3: non-retryable `WorkerError` variants must
+/// short-circuit retries instead of running all the way up to `max_attempts`.
+///
+/// `WorkerError::is_retryable()` and `classify_from_message()` exist as the
+/// public contract, but until this test landed nothing actually consulted them
+/// at runtime. graphile_worker treats every `Err` identically and reschedules
+/// for `e^min(attempts,10)` seconds regardless of error type. The fix is the
+/// auto-registered `PermanentFailurePlugin` (gated on `dlq_processor_interval =
+/// Some(_)`), which on a non-retryable error rewrites the row's `attempts` to
+/// `max_attempts` so the next get_job() ignores it and the next DLQ tick
+/// captures it.
+///
+/// This test enqueues a job whose handler always returns
+/// `WorkerError::ValidationFailed` (non-retryable), runs the worker once, and
+/// asserts the row's attempts immediately reached `max_attempts` after a
+/// single execution.
+#[tokio::test]
+async fn test_non_retryable_error_short_circuits_retries() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        // Enqueue a job that will always return ValidationFailed (non-retryable
+        // because FailJob with should_retry=false hits the else-branch).
+        client
+            .enqueue(
+                "fail_job",
+                &FailJob { should_retry: false },
+                JobSpec {
+                    max_attempts: Some(5),
+                    job_key: Some("non_retryable_short_circuit".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let config = WorkerConfig::new(get_test_database_url())
+            .with_schema(client.schema().to_string())
+            .with_poll_interval(Duration::from_millis(50));
+        // dlq_processor_interval defaults to Some(60s), which is what triggers
+        // PermanentFailurePlugin auto-registration. Don't override it.
+
+        let worker = WorkerRunner::builder(config)
+            .await?
+            .define_job::<FailJob>()
+            .build()
+            .await?;
+
+        // Run once. The handler runs, returns ValidationFailed, JobFail hook
+        // fires, our plugin classifies the error as non-retryable, and rewrites
+        // attempts to max_attempts.
+        worker.process_available_jobs().await?;
+
+        // Verify: attempts hit max_attempts after a single execution rather
+        // than incrementing by one per retry.
+        let row: (i16, i16) = sqlx::query_as(&format!(
+            "SELECT attempts, max_attempts FROM {}._private_jobs LIMIT 1",
+            client.schema()
+        ))
+        .fetch_one(client.pool())
+        .await?;
+        let (attempts, max_attempts) = row;
+        assert_eq!(
+            attempts, max_attempts,
+            "Non-retryable error should short-circuit retries: attempts = max_attempts \
+             (got attempts={}, max_attempts={})",
+            attempts, max_attempts
+        );
+
+        // The DLQ processor would normally pick this up on its next tick. We
+        // can call it directly to verify the end-to-end behaviour: the job
+        // ends up in the DLQ within a single retry-cycle's worth of time.
+        let moved = client.process_failed_jobs().await?;
+        assert_eq!(moved, 1, "permanent-failure short-circuit should make the job DLQ-eligible");
+
+        let dlq = client.list_dlq_jobs(DlqFilter::default()).await?;
+        assert_eq!(dlq.jobs.len(), 1);
+        assert_eq!(dlq.jobs[0].task_identifier, "fail_job");
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn test_retryable_error_does_not_short_circuit() -> Result<()> {
+    // Mirror of the previous test: confirms the plugin only fires for
+    // non-retryable errors, leaving the normal exponential-backoff path
+    // intact for everything else.
+    with_isolated_schema(|client| async move {
+        client
+            .enqueue(
+                "fail_job",
+                // should_retry=true with attempt<3 returns TemporaryUnavailable
+                // (retryable); on later attempts it would return ValidationFailed,
+                // but with max_attempts=2 we'll only see one execution.
+                &FailJob { should_retry: true },
+                JobSpec {
+                    max_attempts: Some(2),
+                    job_key: Some("retryable_no_short_circuit".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let config = WorkerConfig::new(get_test_database_url())
+            .with_schema(client.schema().to_string())
+            .with_poll_interval(Duration::from_millis(50));
+
+        let worker = WorkerRunner::builder(config)
+            .await?
+            .define_job::<FailJob>()
+            .build()
+            .await?;
+
+        worker.process_available_jobs().await?;
+
+        let (attempts, max_attempts): (i16, i16) = sqlx::query_as(&format!(
+            "SELECT attempts, max_attempts FROM {}._private_jobs LIMIT 1",
+            client.schema()
+        ))
+        .fetch_one(client.pool())
+        .await?;
+        assert_eq!(
+            attempts, 1,
+            "Retryable error must NOT short-circuit; expected attempts=1 after one execution \
+             (got attempts={}, max_attempts={})",
+            attempts, max_attempts
+        );
+
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 async fn test_plugin_worker_lifecycle_hooks() -> Result<()> {
     with_isolated_schema(|client| async move {
