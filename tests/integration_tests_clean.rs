@@ -2,6 +2,7 @@ type Result<T> = std::result::Result<T, BackfillError>;
 use backfill::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Test job payload for integration tests
@@ -482,6 +483,18 @@ impl TaskHandler for CronTestHandler {
     }
 }
 
+// Trivial success handler for tests that need a real job to run to completion.
+#[derive(Clone, Serialize, Deserialize)]
+struct OkHandler;
+
+impl TaskHandler for OkHandler {
+    const IDENTIFIER: &'static str = "ok_handler";
+
+    async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
+        Ok::<(), std::io::Error>(())
+    }
+}
+
 #[tokio::test]
 async fn test_cron_schedule_registration() -> Result<()> {
     ensure_test_database().await?;
@@ -846,6 +859,109 @@ async fn test_startup_cleanup_releases_both_lock_types() -> Result<()> {
         .fetch_one(pool)
         .await?;
         assert_eq!(job_locked_by, None, "Job lock should be released");
+
+        Ok(())
+    })
+    .await
+}
+
+/// End-to-end worker crash-recovery test.
+///
+/// Existing stale-lock tests exercise the SQL helpers (`release_stale_*`)
+/// directly. This test instead validates the full crash-recovery loop
+/// through the `WorkerRunner` startup path:
+///
+/// 1. Enqueue a job, then forcibly stamp `_private_jobs.locked_at` far in the
+///    past with a fake `locked_by` to simulate a worker that crashed
+///    mid-execution.
+/// 2. Spin up a fresh `WorkerRunner`. Its startup_cleanup step should release
+///    the stale lock.
+/// 3. The newly-started worker should then pick up the unlocked job and run it
+///    to completion.
+/// 4. After cancellation, the row should be gone — the job ran successfully.
+///
+/// If startup_cleanup were skipped, broken, or ordered after the worker's
+/// first poll, the job would stay locked and the row would still be in the
+/// table at the end. This test pins the recovery contract end-to-end.
+#[tokio::test]
+async fn test_worker_crash_recovery_through_startup() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        let schema = client.schema().to_string();
+
+        // Enqueue using `enqueue_task` so the payload shape matches the
+        // handler — a previous version of this test enqueued a TestJob
+        // payload against the OkHandler identifier, which deserialized
+        // wrong inside the worker and quietly failed instead of running.
+        let outcome = client.enqueue_task(OkHandler, JobSpec::default()).await?;
+        let job = outcome.expect("enqueue");
+        let job_id = *job.id();
+
+        // Simulate a crashed worker holding the lock for an hour.
+        sqlx::query(&format!(
+            "UPDATE {schema}._private_jobs \
+             SET locked_at = NOW() - INTERVAL '1 hour', locked_by = 'crashed_worker' \
+             WHERE id = $1"
+        ))
+        .bind(job_id)
+        .execute(client.pool())
+        .await?;
+
+        // Sanity check — the job is locked.
+        let locked: (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {schema}._private_jobs WHERE locked_at IS NOT NULL"
+        ))
+        .fetch_one(client.pool())
+        .await?;
+        assert_eq!(locked.0, 1, "job should be locked before recovery starts");
+
+        // Build a worker. dlq_processor_interval is set to 60s so the
+        // background DLQ tick can't fire during the test window — only the
+        // synchronous startup_cleanup gets to act on the locked row.
+        let config = WorkerConfig::new(get_test_database_url())
+            .with_schema(&schema)
+            .with_poll_interval(std::time::Duration::from_millis(50))
+            .with_dlq_processor_interval(Some(std::time::Duration::from_secs(60)));
+        let worker = WorkerRunner::builder(config)
+            .await?
+            .define_job::<OkHandler>()
+            .build()
+            .await?;
+
+        let token = CancellationToken::new();
+        let handle = worker.spawn_background(token.clone());
+
+        // Poll for the row to disappear. Worker init + startup_cleanup +
+        // first poll + handler + delete should all complete within a few
+        // seconds; bound the wait so a regression doesn't hang the test.
+        let mut recovered = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let remaining: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {schema}._private_jobs"))
+                .fetch_one(client.pool())
+                .await?;
+            if remaining.0 == 0 {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Pull diagnostic state if we didn't recover, then cancel.
+        type JobDiagRow = (i16, i16, Option<chrono::DateTime<chrono::Utc>>, Option<String>);
+        let final_state: Option<JobDiagRow> = sqlx::query_as(&format!(
+            "SELECT attempts, max_attempts, locked_at, locked_by FROM {schema}._private_jobs LIMIT 1"
+        ))
+        .fetch_optional(client.pool())
+        .await?;
+
+        token.cancel();
+        let _ = handle.await;
+
+        assert!(
+            recovered,
+            "the previously-stale-locked job should have been recovered, run, and removed within 5s. \
+             Final row state: {final_state:?}"
+        );
 
         Ok(())
     })
