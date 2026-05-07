@@ -9,8 +9,14 @@
 //! - **Parallel execution** by default - jobs run concurrently across all
 //!   workers
 //! - **Serial queues** when you need ordering or rate limiting
-//! - **Exponential backoff** with jitter to prevent thundering herds
-//! - **Flexible retry policies** (fast, aggressive, conservative, or custom)
+//! - **Exponential backoff retries** via graphile_worker (timing is
+//!   `exp(min(attempts, 10))` seconds; fixed, not per-job tunable — see
+//!   [`RetryPolicy`])
+//! - **Configurable max-attempts per job** with `fast`, `aggressive`, and
+//!   `conservative` presets
+//! - **Permanent-failure short-circuit** — non-retryable `WorkerError` variants
+//!   land in the DLQ on the first failure instead of waiting for `max_attempts`
+//!   to exhaust
 //! - **Dead letter queue** handling for failed jobs
 //! - **Type-safe job handlers** using Rust's type system
 //! - **Low-latency execution** via PostgreSQL LISTEN/NOTIFY
@@ -62,6 +68,23 @@
 //! ```
 
 use chrono::{DateTime, Utc};
+// === Re-exports from `graphile_worker` ===
+//
+// The types below are part of backfill's *public* API surface — users
+// importing `backfill::*` see them and write code against them. As a
+// consequence, every graphile_worker minor or patch release that touches
+// any of these types (renames, signature changes, removal) is a breaking
+// change for backfill, even when graphile_worker itself doesn't intend
+// it as one (graphile_worker is pre-1.0; minor bumps are allowed to be
+// breaking under semver, and patch releases occasionally are too).
+//
+// When upgrading the graphile_worker dependency:
+// 1. Re-run the integration test suite (`cargo nextest run -F axum`).
+// 2. Audit this re-export list against the new graphile_worker for any rename/removal — those need a corresponding
+//    backfill major bump and migration note for downstream users.
+// 3. Audit `_private_*` schema usage in src/client/dlq.rs, src/client/cleanup.rs, and src/admin.rs —
+//    graphile_worker reserves the right to change those tables across versions.
+//
 // Lifecycle hooks for plugins - new Plugin API with event registration
 pub use graphile_worker::{
     // Event types (for hooks.on() registration)
@@ -113,6 +136,7 @@ use serde::Serialize;
 mod client;
 mod dlq_cleanup_plugin;
 mod errors;
+mod permanent_failure_plugin;
 mod priorities;
 mod retries;
 mod worker;
@@ -128,6 +152,7 @@ pub use client::cleanup::{
 pub use client::*;
 pub use dlq_cleanup_plugin::DlqCleanupPlugin;
 pub use errors::{BackfillError, WorkerError};
+pub use permanent_failure_plugin::PermanentFailurePlugin;
 pub use priorities::*;
 pub use retries::*;
 pub use worker::*;
@@ -227,14 +252,31 @@ impl Queue {
         }
     }
 
-    /// Returns a string representation for logging/metrics.
+    /// Returns a string representation for logging.
     ///
     /// Returns "parallel" for parallel queues, or the queue name for serial
-    /// queues.
+    /// queues. **Do not use this for metric labels** — serial queue names can
+    /// have unbounded cardinality (e.g., `Queue::serial_for("user", id)`
+    /// produces a different name per user, which would explode Prometheus
+    /// time-series storage). Use [`Queue::metric_label`] for metrics.
     pub fn as_str(&self) -> &str {
         match self {
             Queue::Parallel => "parallel",
             Queue::Serial(name) => name,
+        }
+    }
+
+    /// Bounded label suitable for metrics: returns either `"parallel"` or
+    /// `"serial"`.
+    ///
+    /// This drops the queue name. The library uses this for all built-in
+    /// metric emission (`backfill_jobs_enqueued`, `backfill_dlq_*`, etc.) to
+    /// keep label cardinality bounded. If you need per-queue metrics for a
+    /// fixed, small set of named queues, emit them yourself via a plugin.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Queue::Parallel => "parallel",
+            Queue::Serial(_) => "serial",
         }
     }
 
@@ -256,17 +298,45 @@ impl Queue {
 
 /// Outcome of an enqueue operation.
 ///
-/// When enqueueing a job, the result can either be:
-/// - `Enqueued(Job)`: The job was successfully created or updated
-/// - `AlreadyInProgress { job_key }`: A job with this key is currently locked
-///   by a worker
+/// `enqueue` returns `Result<EnqueueOutcome, _>`. This enum distinguishes
+/// the two non-error outcomes:
+///
+/// - [`EnqueueOutcome::Enqueued`] — the job was created (or, with
+///   `JobKeyMode::Replace`, updated). The boxed `Job` carries the job's
+///   id/queue_id/etc.
+/// - [`EnqueueOutcome::AlreadyInProgress`] — a job with the same `job_key` was
+///   **currently locked by a worker** when we tried to add this one. This is
+///   *not* a duplicate-key collision (that's handled by `job_key_mode`); it's a
+///   race where the worker grabbed the existing job before our update could
+///   land. The new payload was discarded.
+///
+/// # ⚠️ Footgun warning
+///
+/// Treating every `Ok(_)` return as "the job is enqueued" is wrong. A
+/// caller who writes:
+///
+/// ```ignore
+/// // BUG: silently drops AlreadyInProgress as if it were success
+/// let job_id = client.enqueue(...).await?.unwrap().id();
+/// ```
+///
+/// will panic at runtime any time the race fires. Always pattern-match,
+/// or use [`EnqueueOutcome::is_already_in_progress`] / [`EnqueueOutcome::job`]
+/// to handle the case explicitly. `.unwrap()` and `.expect()` panic on
+/// `AlreadyInProgress` by design — they're only safe when you're certain
+/// no worker is holding the key.
 #[derive(Debug, Clone)]
 pub enum EnqueueOutcome {
-    /// Job was successfully enqueued (either created or updated)
+    /// Job was successfully enqueued (either created or updated).
     Enqueued(Box<Job>),
     /// A job with this key is already in progress (locked by a worker).
-    /// Contains the job_key that was in conflict.
-    AlreadyInProgress { job_key: String },
+    /// The new payload was **not** stored — your update is lost. Decide in
+    /// the caller whether to retry, queue a different job, or accept the
+    /// drop.
+    AlreadyInProgress {
+        /// The job_key that conflicted.
+        job_key: String,
+    },
 }
 
 impl EnqueueOutcome {
@@ -360,14 +430,22 @@ impl Default for JobSpec {
 }
 
 impl JobSpec {
-    /// Create a JobSpec with exponential backoff retry policy
+    /// Attach a [`RetryPolicy`] to this JobSpec.
+    ///
+    /// Sets `max_attempts` from the policy. Note that backoff timing fields
+    /// on the policy are stored but not honored at runtime — see
+    /// [`RetryPolicy`].
     pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.max_attempts = Some(retry_policy.max_attempts);
         self.retry_policy = Some(retry_policy);
         self
     }
 
-    /// Create a JobSpec optimized for fast retries
+    /// Configure for the `fast` preset: `max_attempts = 3`.
+    ///
+    /// In practice this differs from [`with_aggressive_retries`] and
+    /// [`with_conservative_retries`] only in the attempt count — see
+    /// [`RetryPolicy`].
     pub fn with_fast_retries(mut self) -> Self {
         let policy = RetryPolicy::fast();
         self.max_attempts = Some(policy.max_attempts);
@@ -375,7 +453,10 @@ impl JobSpec {
         self
     }
 
-    /// Create a JobSpec optimized for aggressive retries
+    /// Configure for the `aggressive` preset: `max_attempts = 12`.
+    ///
+    /// At graphile_worker's fixed exp-backoff schedule, 12 attempts gives
+    /// roughly half a day of cumulative retry coverage before DLQ.
     pub fn with_aggressive_retries(mut self) -> Self {
         let policy = RetryPolicy::aggressive();
         self.max_attempts = Some(policy.max_attempts);
@@ -383,7 +464,7 @@ impl JobSpec {
         self
     }
 
-    /// Create a JobSpec optimized for conservative retries
+    /// Configure for the `conservative` preset: `max_attempts = 5`.
     pub fn with_conservative_retries(mut self) -> Self {
         let policy = RetryPolicy::conservative();
         self.max_attempts = Some(policy.max_attempts);
@@ -391,15 +472,28 @@ impl JobSpec {
         self
     }
 
-    /// Get the effective retry policy (returns default if none specified)
+    /// Get the effective retry policy (returns default if none specified).
+    ///
+    /// **Note:** Only `max_attempts` from the returned policy reaches
+    /// graphile_worker. See [`RetryPolicy`] for details.
     pub fn effective_retry_policy(&self) -> RetryPolicy {
         self.retry_policy.clone().unwrap_or_default()
     }
 
-    /// Calculate the next retry time for a failed job
+    /// Calculate what the next retry time *would* be under this spec's
+    /// policy.
+    ///
+    /// **Not used at runtime.** graphile_worker schedules retries via a
+    /// fixed SQL formula. This method is preserved as a utility but has no
+    /// effect on actual job behaviour.
+    #[deprecated(
+        since = "1.2.0",
+        note = "graphile_worker computes retry timing in SQL and ignores this method. Returns a value but has no runtime effect."
+    )]
     pub fn calculate_retry_time(&self, attempt: i32, failed_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let policy = self.effective_retry_policy();
         if policy.should_retry(attempt) {
+            #[allow(deprecated)]
             Some(policy.calculate_retry_time(attempt, failed_at))
         } else {
             None // No more retries
@@ -492,9 +586,11 @@ pub async fn enqueue_emergency<T>(
 where
     T: Serialize,
 {
+    // run_at defaults to None, which graphile_worker resolves to NOW() at the
+    // SQL layer — equivalent to "execute immediately" without the extra Rust-
+    // side clock read.
     let spec = JobSpec {
         priority: Priority::EMERGENCY,
-        run_at: Some(Utc::now()), // Execute immediately
         job_key,
         ..Default::default()
     };
@@ -502,10 +598,12 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a high-priority job with fast exponential backoff retries.
+/// Enqueue a high-priority job configured for a low retry count (3 attempts).
 ///
-/// Best for high-priority jobs that need quick retries (3 attempts, 100ms-30s
-/// delays).
+/// Use for jobs where rapid failure-to-DLQ is preferred over many retries.
+/// graphile_worker's retry timing is fixed at `exp(min(attempts, 10))` seconds
+/// regardless of policy — see [`RetryPolicy`] — so the only difference between
+/// this and other `_with_retries` helpers is the attempt cap.
 pub async fn enqueue_fast_with_retries<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -525,9 +623,12 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a critical job with aggressive exponential backoff retries.
+/// Enqueue a critical job with a high retry count (12 attempts).
 ///
-/// Best for critical jobs that must succeed (12 attempts, up to 4 hour delays).
+/// Use for jobs that must eventually succeed if at all possible.
+/// graphile_worker retries on a fixed `exp(min(attempts, 10))` second schedule,
+/// capping at ~6h per retry — so 12 attempts gives roughly half a day of total
+/// retry coverage. See [`RetryPolicy`] for the full timing.
 pub async fn enqueue_critical<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -547,10 +648,13 @@ where
     client.enqueue(task_identifier, payload, spec).await
 }
 
-/// Enqueue a bulk job with conservative exponential backoff retries.
+/// Enqueue a bulk job with a moderate retry count (5 attempts via the
+/// `conservative` preset).
 ///
-/// Best for background jobs where consistency matters more than speed
-/// (8 attempts, 1 min - 8 hour delays).
+/// Use for background jobs that should be retried but where you don't want
+/// many attempts. graphile_worker's retry timing is `exp(min(attempts, 10))`
+/// seconds — see [`RetryPolicy`] — so this gives roughly 1s, 3s, 7s, 20s,
+/// 55s before the job lands in DLQ.
 pub async fn enqueue_bulk_with_retries<T>(
     client: &BackfillClient,
     task_identifier: &str,
@@ -638,6 +742,18 @@ mod tests {
         assert!(!Queue::Parallel.is_serial());
         assert_eq!(Queue::Parallel.name(), None);
         assert_eq!(Queue::Parallel.as_str(), "parallel");
+    }
+
+    #[test]
+    fn queue_metric_label_is_bounded() {
+        // The whole point of metric_label vs as_str: per-entity serial queues
+        // (e.g., "user:123") collapse to "serial" instead of carrying the
+        // unbounded entity id into Prometheus labels.
+        assert_eq!(Queue::Parallel.metric_label(), "parallel");
+        assert_eq!(Queue::serial("anything").metric_label(), "serial");
+        assert_eq!(Queue::serial_for("user", 12345).metric_label(), "serial");
+        assert_eq!(Queue::serial_for("user", 99999).metric_label(), "serial");
+        assert_eq!(Queue::dead_letter().metric_label(), "serial");
     }
 
     #[test]

@@ -101,19 +101,31 @@ use tokio_util::sync::CancellationToken;
 use crate::{BackfillClient, BackfillError, Plugin, TaskHandler, WorkerOptions};
 
 // Re-export for use in wrapper
-/// Configuration for a worker queue
+/// Configuration for a worker queue.
+///
+/// **Currently only `concurrency` is honored.** `name` and `priority_range`
+/// were intended for multi-queue worker setups, but graphile_worker's
+/// `WorkerOptions` doesn't expose per-worker queue filtering, so a single
+/// `WorkerRunner` runs exactly one worker and consumes only the first
+/// `QueueConfig` in `WorkerConfig::queue_configs`. To run multiple workers
+/// with different queue specializations, spawn multiple `WorkerRunner`s.
 #[derive(Debug, Clone)]
 pub struct QueueConfig {
-    /// Queue name (None for default queue)
+    /// Queue name (None for default queue). **Not honored** — the worker
+    /// processes jobs from any queue regardless of this field.
     pub name: Option<String>,
-    /// Number of concurrent jobs to process in this queue
+    /// Number of concurrent jobs to process. **Honored.**
     pub concurrency: usize,
-    /// Priority range for jobs in this queue (inclusive)
+    /// Priority range for jobs in this queue. **Not honored** — the worker
+    /// fetches by priority order with no range filter.
     pub priority_range: Option<(i32, i32)>,
 }
 
 impl QueueConfig {
-    /// Create configuration for the default queue
+    /// Create configuration for the default queue with the given concurrency.
+    ///
+    /// This is the only `QueueConfig` constructor where every field is
+    /// actually honored at runtime.
     pub fn default_queue(concurrency: usize) -> Self {
         Self {
             name: None,
@@ -122,7 +134,17 @@ impl QueueConfig {
         }
     }
 
-    /// Create configuration for a named queue
+    /// Create configuration for a named queue.
+    ///
+    /// **Deprecated**: the `name` field is not honored at worker startup —
+    /// graphile_worker's `WorkerOptions` doesn't filter jobs by queue. Use
+    /// [`WorkerConfig::with_concurrency`] instead, and route jobs to
+    /// specific named queues at enqueue time via `Queue::serial(name)`.
+    #[deprecated(
+        since = "1.2.0",
+        note = "queue name is not honored by graphile_worker's WorkerOptions; use WorkerConfig::with_concurrency \
+                and route jobs to named queues at enqueue time via Queue::serial(name)"
+    )]
     pub fn named_queue(name: impl Into<String>, concurrency: usize) -> Self {
         Self {
             name: Some(name.into()),
@@ -131,7 +153,16 @@ impl QueueConfig {
         }
     }
 
-    /// Create configuration for a priority-based queue
+    /// Create configuration for a priority-based queue.
+    ///
+    /// **Deprecated**: neither `name` nor `priority_range` is honored at
+    /// runtime. The worker fetches jobs by priority order (lower number
+    /// first) regardless of any range configured here. Use
+    /// [`WorkerConfig::with_concurrency`] instead.
+    #[deprecated(
+        since = "1.2.0",
+        note = "priority_range is never honored by the worker fetch loop; this constructor stores values that are dead. Use WorkerConfig::with_concurrency."
+    )]
     pub fn priority_queue(name: impl Into<String>, concurrency: usize, min_priority: i32, max_priority: i32) -> Self {
         Self {
             name: Some(name.into()),
@@ -203,7 +234,28 @@ impl WorkerConfig {
         self
     }
 
-    /// Set queue configurations
+    /// Set the worker's concurrency.
+    ///
+    /// `WorkerRunner` runs a single graphile_worker `Worker` whose
+    /// `concurrency` setting determines how many jobs it can execute in
+    /// parallel. To run multiple specialized workers, spawn multiple
+    /// `WorkerRunner` instances yourself.
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.queue_configs = vec![QueueConfig::default_queue(concurrency)];
+        self
+    }
+
+    /// Set queue configurations.
+    ///
+    /// **Deprecated**: only the first `QueueConfig`'s `concurrency` is
+    /// honored — graphile_worker's `WorkerOptions` doesn't expose
+    /// per-worker queue filtering, so subsequent configs are ignored. Use
+    /// [`Self::with_concurrency`] instead. Route jobs to named queues at
+    /// enqueue time via `Queue::serial(name)`.
+    #[deprecated(
+        since = "1.2.0",
+        note = "only the first QueueConfig's concurrency is honored; use with_concurrency() and route via Queue::serial(name) at enqueue time"
+    )]
     pub fn with_queues(mut self, queues: Vec<QueueConfig>) -> Self {
         self.queue_configs = queues;
         self
@@ -518,11 +570,20 @@ impl WorkerRunner {
             worker_options = applier(worker_options);
         }
 
-        // If DLQ is enabled, add the cleanup plugin that removes DLQ entries
-        // when jobs with matching job_keys complete successfully
+        // If DLQ is enabled, register the built-in plugins that wire backfill's
+        // error semantics through to graphile_worker:
+        //
+        // - DlqCleanupPlugin: when a requeued DLQ job completes successfully, removes
+        //   the matching DLQ entry so it isn't requeued again.
+        // - PermanentFailurePlugin: when a handler returns a non-retryable
+        //   `WorkerError` variant (ValidationFailed, Unauthorized, etc.),
+        //   short-circuits remaining retry attempts so the job lands in the DLQ on the
+        //   next processor tick instead of waiting hours.
         if self.config.dlq_processor_interval.is_some() {
             let cleanup_plugin = crate::DlqCleanupPlugin::new(self.client.clone());
             worker_options = worker_options.add_plugin(cleanup_plugin);
+            let permanent_failure_plugin = crate::PermanentFailurePlugin::new(self.client.clone());
+            worker_options = worker_options.add_plugin(permanent_failure_plugin);
         }
 
         worker_options
@@ -667,6 +728,39 @@ impl WorkerRunner {
             self.config.stale_lock_cleanup_interval.is_some()
         );
 
+        // Move permanently-failed jobs to the DLQ BEFORE startup cleanup runs.
+        //
+        // `startup_cleanup_with_timeouts()` calls `cleanup_permanently_failed_jobs()`
+        // which deletes rows from `_private_jobs` where `attempts >= max_attempts`.
+        // The DLQ processor uses the SAME predicate to find candidates to move into
+        // the DLQ — but it runs as a periodic background task that hasn't ticked yet
+        // at startup. Without this pre-move, any job that hit `max_attempts` while
+        // the worker was down (or in the gap between final failure and the next
+        // DLQ-processor tick on the previous run) would be silently deleted by
+        // cleanup before it reached the DLQ.
+        //
+        // We only run this when DLQ is enabled. If the user opted out of DLQ via
+        // `dlq_processor_interval = None`, they've explicitly chosen the
+        // delete-failed-jobs behaviour and we leave it intact.
+        if self.config.dlq_processor_interval.is_some() {
+            match self.client.process_failed_jobs().await {
+                Ok(moved) if moved > 0 => {
+                    log::info!(
+                        "Pre-cleanup DLQ move captured permanently-failed jobs (moved: {})",
+                        moved
+                    );
+                }
+                Ok(_) => {
+                    // No failed jobs waiting; nothing to capture.
+                }
+                Err(e) => {
+                    // If this fails, the next call to startup_cleanup may delete the
+                    // affected jobs. We log loudly so an operator can investigate.
+                    log::error!("Pre-cleanup DLQ move failed; jobs may be lost when cleanup runs: {}", e);
+                }
+            }
+        }
+
         // Run startup cleanup with configured timeouts
         if let Err(e) = self
             .client
@@ -783,33 +877,29 @@ impl WorkerRunner {
         tokio::spawn(async move { runner.run_until_cancelled(cancellation_token).await })
     }
 
-    /// Process all currently available jobs and return
+    /// Process all currently available jobs and return.
     ///
     /// This method is designed for batch processing or testing scenarios where
     /// you want to process the current job queue without running a persistent
     /// worker.
     ///
-    /// This method processes all jobs that are currently available (where
-    /// `run_at <= now()`), respecting the configured concurrency limit.
-    /// Jobs are processed in priority order (lower priority number = higher
-    /// priority), then by `run_at` timestamp.
+    /// Processes all jobs where `run_at <= now()`, respecting the configured
+    /// concurrency limit. Jobs are processed in priority order (lower number =
+    /// higher priority), then by `run_at`.
     ///
-    /// The method returns when:
-    /// - All available jobs have been processed
-    /// - No more jobs are available to process
+    /// Returns when all available jobs have been processed.
     ///
-    /// Note: This method currently returns 0 as an accurate job count would
-    /// require additional instrumentation. The jobs are still processed
-    /// correctly.
+    /// # Counting jobs
     ///
-    /// # Returns
-    ///
-    /// Returns `Ok(0)` on success (job count tracking not yet implemented).
+    /// If you need to know how many jobs ran, register a `JobComplete` /
+    /// `JobFail` plugin via `add_plugin()` before building the worker — that's
+    /// the supported path for runtime job-count instrumentation. This method
+    /// no longer pretends to count for you.
     ///
     /// # Errors
     ///
     /// Returns an error if worker initialization or job processing fails.
-    pub async fn process_available_jobs(&self) -> Result<usize, BackfillError> {
+    pub async fn process_available_jobs(&self) -> Result<(), BackfillError> {
         log::info!("Processing available jobs (one-shot mode)");
 
         // Create worker instance
@@ -823,10 +913,7 @@ impl WorkerRunner {
             .map_err(|e| BackfillError::WorkerRuntime(e.to_string()))?;
 
         log::info!("Finished processing available jobs");
-
-        // Note: Returning 0 for now as accurate counting would require additional
-        // instrumentation. Consider using metrics or hooks to track job counts.
-        Ok(0)
+        Ok(())
     }
 
     /// Get access to the underlying BackfillClient for job enqueueing and
@@ -835,9 +922,14 @@ impl WorkerRunner {
         &self.client
     }
 
-    /// Get the number of worker instances configured
+    /// Get the number of worker instances actually running.
+    ///
+    /// Always returns 1: `WorkerRunner` spawns exactly one graphile_worker
+    /// `Worker`. The historical `Vec<QueueConfig>` API allowed callers to
+    /// pass multiple configs, but only the first was ever used at runtime —
+    /// this method now reports the truth instead of `queue_configs.len()`.
     pub fn worker_count(&self) -> usize {
-        self.config.queue_configs.len()
+        1
     }
 
     /// Check if DLQ processor is enabled
@@ -851,6 +943,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)] // pins the deprecated constructors' storage shape
     fn test_queue_config_builders() {
         let default = QueueConfig::default_queue(5);
         assert_eq!(default.name, None);

@@ -1,7 +1,6 @@
 # backfill
 
 [![CI](https://github.com/ceejbot/backfill/workflows/CI/badge.svg)](https://github.com/ceejbot/backfill/actions)
-[![Coverage](https://img.shields.io/badge/coverage-64.67%25-yellow)](https://github.com/ceejbot/backfill/actions)
 [![Security](https://github.com/ceejbot/backfill/actions/workflows/security.yml/badge.svg)](https://github.com/ceejbot/backfill/actions/workflows/security.yml)
 
 A boringly-named priority queue system for doing async work. This library and work process wrap the the [graphile_worker crate](https://lib.rs/crates/graphile_worker) to do things the way I want to do them. It's unlikely you'll want to do things exactly this way, but perhaps you can learn by reading the code, or get a jumpstart by borrowing open-source code, or heck, maybe this will do what you need.
@@ -10,37 +9,70 @@ A boringly-named priority queue system for doing async work. This library and wo
 
 This is a postgres-backed async work queue library that is a set of conveniences and features on top of the rust port of Graphile Worker. It gives you a library you can integrate with your own project to handle background tasks.
 
-> **Status**: Core features are complete and tested (64.67%% test coverage, 55 tests). The library is suitable for production use for job enqueueing, worker processing, and DLQ management. The Admin API (feature-gated) is experimental. See [CHANGELOG.md](CHANGELOG.md) for details and [Known Limitations](docs/02-dlq.md#known-limitations).
+> **Status**: Core features are complete and covered by an integration test
+> suite. The library is suitable for production use for job enqueueing,
+> worker processing, and DLQ management. The Admin API (feature-gated) is
+> experimental. See [CHANGELOG.md](CHANGELOG.md) for details and
+> [Known Limitations](docs/02-dlq.md#known-limitations).
 
 ### What's New Over graphile_worker
 
-Built on top of `graphile_worker` (v0.8.6), backfill adds these production-ready features:
+Built on top of `graphile_worker` (v0.11.x), backfill adds these production-ready features:
 
-- 🎯 **Priority System** - Six-level priority queue (EMERGENCY to BULK_LOWEST) with numeric priority values
-- 📦 **Named Queues** - Pre-configured Fast/Bulk queues plus custom queue support
-- 🔄 **Smart Retry Policies** - Exponential backoff with jitter (fast/aggressive/conservative presets)
-- 💀 **Dead Letter Queue (DLQ)** - Automatic failed job handling with query/requeue/deletion APIs
-- 📊 **Comprehensive Metrics** - Prometheus-compatible metrics for jobs, DLQ, and database operations
-- 🛠️ **High-Level Client API** - `BackfillClient` with ergonomic enqueueing helpers
-- 🏃 **Flexible Worker Patterns** - `WorkerRunner` supporting tokio::select!, background tasks, and one-shot processing
-- 🔧 **Admin API** - Optional Axum router for HTTP-based job management (experimental)
-- 📝 **Convenience Functions** - `enqueue_fast()`, `enqueue_bulk()`, `enqueue_critical()`, etc.
-- 🧹 **Stale Lock Cleanup** - Automatic cleanup of orphaned locks from crashed workers (startup + periodic)
+- 🎯 **Priority System** — Six-level priority enum (EMERGENCY=-20 down through
+  BULK_LOWEST=10), mapped through to graphile_worker's `priority asc` fetch
+  ordering.
+- 📦 **Parallel + Serial queues** — `Queue::Parallel` (default, jobs run
+  concurrently across workers) or `Queue::Serial(name)` (one-job-at-a-time
+  per named queue, for rate limiting or per-entity ordering).
+- 🔄 **Retry policy presets** — `fast` / `aggressive` / `conservative`
+  presets that differ in `max_attempts`. Note: backoff *timing* is fixed by
+  graphile_worker (see [`docs/02-dlq.md`](docs/02-dlq.md)) — only the
+  attempt count is configurable.
+- 💀 **Dead Letter Queue (DLQ)** — Automatic failed-job handling with
+  query/requeue/deletion APIs. Includes a permanent-failure short-circuit
+  plugin: handlers that return non-retryable `WorkerError` variants land in
+  the DLQ on the first failure rather than waiting for `max_attempts` to
+  exhaust.
+- 📊 **Comprehensive Metrics** — Prometheus-compatible metrics for jobs,
+  DLQ, and database operations.
+- 🛠️ **High-Level Client API** — `BackfillClient` with ergonomic enqueueing
+  helpers.
+- 🏃 **Flexible Worker Patterns** — `WorkerRunner` supporting
+  `tokio::select!`, background tasks, and one-shot processing.
+- 🔧 **Admin API** — Optional Axum router for HTTP-based job management
+  (experimental).
+- 📝 **Convenience Functions** — `enqueue_fast()`, `enqueue_bulk()`,
+  `enqueue_critical()`, etc.
+- 🧹 **Stale Lock Cleanup** — Automatic cleanup of orphaned locks from
+  crashed workers (startup + periodic). Ordered correctly with the DLQ
+  scanner so failed jobs aren't lost across restarts.
 
 All built on graphile_worker's rock-solid foundation of PostgreSQL SKIP LOCKED and LISTEN/NOTIFY.
 
 ### Features
 
-- **Priority queues**: EMERGENCY, FAST_HIGH, FAST_DEFAULT, BULK_DEFAULT, BULK_LOW, BULK_LOWEST
-- **Named queues**: Fast, Bulk, DeadLetter, Custom(name)
-- **Scheduling**: Immediate or delayed execution with `run_at`
-- **Idempotency**: Use `job_key` for deduplication
-- **Exponential backoff**: Built-in retry policies with jitter to prevent thundering herds
-- **Dead letter queue**: Handling jobs that experience un-retryable failures or exceed their retry limits
-- **Error handling**: Automatic retry classification
-- **Metrics**: Comprehensive metrics via the `metrics` crate - bring your own exporter (Prometheus, StatsD, etc.)
-- **Monitoring**: Structured logging and tracing throughout
-- **Building blocks for an axum admin api**: via a router you can mount on your own axum api server
+- **Priority queues**: EMERGENCY (-20), FAST_HIGH (-10), FAST_DEFAULT (-5),
+  BULK_DEFAULT (0), BULK_LOW (5), BULK_LOWEST (10) — lower number = higher
+  priority.
+- **Queue types**: `Queue::Parallel` (default), `Queue::Serial(name)` — plus
+  `Queue::serial_for(entity, id)` for per-entity ordering.
+- **Scheduling**: Immediate or delayed execution with `run_at`.
+- **Idempotency**: Use `job_key` for deduplication.
+- **Retries**: Configurable `max_attempts` per job; graphile_worker handles
+  the exponential-backoff schedule (`exp(min(attempts, 10))` seconds, capped
+  at ~6h per retry).
+- **Dead letter queue**: Automatic capture of jobs that exceed their retry
+  limits or return non-retryable errors. Includes a synchronous startup
+  pre-move so DLQ doesn't lose jobs across worker restarts.
+- **Error classification**: `WorkerError` variants split into retryable and
+  non-retryable; non-retryable errors short-circuit retries to DLQ via an
+  auto-registered lifecycle plugin.
+- **Metrics**: Comprehensive metrics via the `metrics` crate — bring your
+  own exporter (Prometheus, StatsD, etc.).
+- **Monitoring**: Structured logging and tracing throughout.
+- **Building blocks for an axum admin api**: via a router you can mount on
+  your own axum api server.
 
 Look at the `examples/` directory and the readme there for practical usage examples.
 
@@ -109,22 +141,18 @@ When workers crash without graceful shutdown, they can leave locks behind that p
 
 **⚠️ Warning:** Setting `stale_job_lock_timeout` too short can cause duplicate job execution if jobs legitimately run longer than the timeout. This can lead to data corruption.
 
-### SQLx Compile-Time Query Verification
+### SQLx usage
 
-This library uses SQLx's compile-time query verification for production safety. Set `DATABASE_URL` during compilation to enable type-safe, compile-time checked SQL queries:
+Backfill currently uses runtime SQLx queries (`sqlx::query()` /
+`sqlx::query_scalar()`) rather than the compile-time-checked
+`sqlx::query!()` / `query_as!()` macros. No `DATABASE_URL` is required at
+compile time, and there's no `.sqlx/` metadata cache to maintain. Schema
+errors surface at runtime (caught by the integration test suite).
 
-```bash
-export DATABASE_URL="postgresql://localhost:5432/backfill"
-cargo build  # Queries verified against actual database schema
-```
-
-Alternatively, use offline mode with pre-generated query metadata:
-```bash
-cargo sqlx prepare  # Generates .sqlx/sqlx-data.json
-cargo build         # Uses cached metadata, no database required
-```
-
-See [Database Setup](docs/01-database-setup.md#sqlx-compile-time-query-verification) for detailed setup instructions and best practices.
+If you write your own SQLx queries against backfill's tables in *your*
+application, the compile-time macros are a great fit — see
+[Database Setup](docs/01-database-setup.md) for `cargo sqlx prepare`
+guidance.
 
 ### Automatic Setup
 

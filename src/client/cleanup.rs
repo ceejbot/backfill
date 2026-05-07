@@ -57,18 +57,22 @@ impl BackfillClient {
     pub async fn release_stale_queue_locks(&self, timeout: Duration) -> Result<u64, BackfillError> {
         let timeout_secs = timeout.as_secs();
 
+        // Bind timeout via parameter rather than format-interpolating it.
+        // u64 → i64 cast is safe: i64::MAX seconds is ~292 billion years.
         let query = format!(
             r#"
             UPDATE {schema}._private_job_queues
             SET locked_at = NULL, locked_by = NULL
             WHERE locked_at IS NOT NULL
-              AND locked_at < NOW() - INTERVAL '{timeout_secs} seconds'
+              AND locked_at < NOW() - ($1::bigint * interval '1 second')
             "#,
             schema = self.schema,
-            timeout_secs = timeout_secs
         );
 
-        let result = sqlx::query(&query).execute(&self.pool).await?;
+        let result = sqlx::query(&query)
+            .bind(timeout_secs as i64)
+            .execute(&self.pool)
+            .await?;
         let released = result.rows_affected();
 
         // Always emit metrics (counter increments even for 0)
@@ -105,13 +109,15 @@ impl BackfillClient {
             UPDATE {schema}._private_jobs
             SET locked_at = NULL, locked_by = NULL
             WHERE locked_at IS NOT NULL
-              AND locked_at < NOW() - INTERVAL '{timeout_secs} seconds'
+              AND locked_at < NOW() - ($1::bigint * interval '1 second')
             "#,
             schema = self.schema,
-            timeout_secs = timeout_secs
         );
 
-        let result = sqlx::query(&query).execute(&self.pool).await?;
+        let result = sqlx::query(&query)
+            .bind(timeout_secs as i64)
+            .execute(&self.pool)
+            .await?;
         let released = result.rows_affected();
 
         // Always emit metrics (counter increments even for 0)
@@ -134,9 +140,25 @@ impl BackfillClient {
     /// remain in the main queue with `is_available = false`. These jobs
     /// will never be processed again and should be cleaned up.
     ///
-    /// Note: These jobs should already be captured to the DLQ by the task
-    /// handler or DLQ processor before reaching this state. This function
-    /// removes the leftover rows from the main queue.
+    /// # Important: ordering with the DLQ
+    ///
+    /// **This function deletes the same rows the DLQ processor uses as input.**
+    /// If you call it before `process_failed_jobs()` has captured those rows
+    /// into the DLQ, those jobs are lost forever — they leave the main queue
+    /// without ever reaching the DLQ.
+    ///
+    /// Safe usage when DLQ is enabled:
+    /// 1. Call `process_failed_jobs()` first (moves rows into DLQ).
+    /// 2. Then call this function (cleans up anything the DLQ processor chose
+    ///    not to move — typically jobs with `max_attempts = 0`, which the DLQ
+    ///    processor explicitly skips).
+    ///
+    /// `WorkerRunner::run_until_cancelled` already enforces this ordering at
+    /// startup. Direct callers (ad-hoc maintenance scripts, etc.) must enforce
+    /// it themselves.
+    ///
+    /// If DLQ is disabled, this function is the only cleanup mechanism and will
+    /// silently delete failed jobs — that is by design.
     ///
     /// # Returns
     /// Number of permanently failed jobs that were deleted
@@ -157,10 +179,38 @@ impl BackfillClient {
         crate::metrics::record_cleanup_failed_jobs_deleted(deleted);
 
         if deleted > 0 {
-            log::info!(
-                "Cleaned up permanently failed jobs from main queue (count: {})",
-                deleted
-            );
+            // When the DLQ is enabled, these rows have already been captured
+            // (either by an earlier `process_failed_jobs()` tick or by the
+            // synchronous pre-cleanup move in `WorkerRunner` startup) so this
+            // delete is just garbage collection — INFO is fine. When the DLQ
+            // is *not* enabled, this delete is the only mechanism removing
+            // failed jobs from the main queue and they are gone forever:
+            // surface that loudly so an operator who didn't realize that's
+            // the consequence can see it in their logs.
+            //
+            // Detection uses `to_regclass` which returns NULL if the table
+            // doesn't exist. Failure of the existence check itself doesn't
+            // matter — we default to the louder log on uncertainty.
+            let dlq_oid: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+                .bind(format!("{}.backfill_dlq", self.schema))
+                .fetch_one(&self.pool)
+                .await
+                .ok()
+                .flatten();
+
+            if dlq_oid.is_some() {
+                log::info!(
+                    "Cleaned up permanently failed jobs from main queue (count: {})",
+                    deleted
+                );
+            } else {
+                log::warn!(
+                    "Deleted permanently failed jobs from main queue WITHOUT DLQ capture \
+                     (count: {}); they cannot be recovered. Enable dlq_processor_interval \
+                     to retain failed jobs for inspection.",
+                    deleted
+                );
+            }
         }
 
         Ok(deleted)
@@ -185,6 +235,14 @@ impl BackfillClient {
     ///
     /// This allows configuring the stale lock thresholds for environments
     /// where the defaults aren't appropriate.
+    ///
+    /// # DLQ ordering note
+    ///
+    /// This calls `cleanup_permanently_failed_jobs()`, which DELETEs rows from
+    /// `_private_jobs` where `attempts >= max_attempts`. If you run a DLQ,
+    /// **call `process_failed_jobs()` first** so those rows reach the DLQ
+    /// before they're deleted. `WorkerRunner::run_until_cancelled` does this
+    /// automatically; direct callers must do it themselves.
     ///
     /// # Arguments
     /// * `queue_lock_timeout` - Timeout for queue locks (normally held for ms)

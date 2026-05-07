@@ -1,6 +1,6 @@
 [package]
 name = "backfill"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2024"
 description = "A boringly-named priority work queue system for doing async tasks."
 categories = ["concurrency", "data-structures"]
@@ -16,6 +16,11 @@ axum = ["dep:axum"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+# IMPORTANT: backfill queries graphile_worker's internal `_private_*` tables
+# directly (cleanup, DLQ scanner, admin endpoints). The `_private_*` prefix
+# signals these are internal API. Even within 0.11.x, a patch release that
+# touches the internal schema can silently break backfill — re-run the
+# integration tests against any new graphile_worker version before shipping.
 graphile_worker = "0.11.1"
 graphile_worker_crontab_parser = "0.5.12"
 log = "0.4.28"

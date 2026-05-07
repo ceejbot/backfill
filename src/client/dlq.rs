@@ -32,7 +32,13 @@ pub struct DlqJob {
     pub max_attempts: Option<i32>,
     /// Human-readable failure reason
     pub failure_reason: String,
-    /// Number of times the job failed
+    /// How many times this logical job (by `job_key`) has reached the DLQ.
+    ///
+    /// For jobs with a `job_key`, the DLQ row is upserted: a job that fails,
+    /// gets requeued by an admin, and fails again touches the same DLQ row
+    /// twice — `failure_count` increments by 1 each time. For jobs without
+    /// a `job_key` every failure creates a fresh DLQ row, so this always
+    /// reads `1`.
     pub failure_count: i32,
     /// Last error details as JSON
     pub last_error: Option<serde_json::Value>,
@@ -248,9 +254,25 @@ impl BackfillClient {
             crate::metrics::record_dlq_age(&job.task_identifier, age_seconds);
         }
 
-        // Get total count for pagination (simplified - could be optimized)
-        let count_query = format!("SELECT COUNT(*) FROM {}.backfill_dlq", self.schema);
-        let total: i64 = sqlx::query_scalar(&count_query).fetch_one(&self.pool).await?;
+        // Get total count for pagination, applying the same filters as the list
+        // query. Without this, paging UIs that filter (e.g., by task) compute
+        // wrong page counts because `total` would reflect every DLQ row, not
+        // the filtered subset.
+        let mut count_builder = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM ");
+        count_builder.push(&self.schema).push(".backfill_dlq WHERE 1=1");
+        if let Some(task) = &filter.task_identifier {
+            count_builder.push(" AND task_identifier = ").push_bind(task);
+        }
+        if let Some(queue) = &filter.queue_name {
+            count_builder.push(" AND queue_name = ").push_bind(queue);
+        }
+        if let Some(from) = filter.failed_after {
+            count_builder.push(" AND failed_at >= ").push_bind(from);
+        }
+        if let Some(to) = filter.failed_before {
+            count_builder.push(" AND failed_at <= ").push_bind(to);
+        }
+        let total: i64 = count_builder.build_query_scalar().fetch_one(&self.pool).await?;
 
         Ok(DlqJobList {
             jobs,
@@ -306,6 +328,18 @@ impl BackfillClient {
     }
 
     /// Requeue a job from the DLQ back to the main queue.
+    ///
+    /// Two SQL operations happen back-to-back:
+    /// 1. Enqueue the job (via `WorkerUtils::add_raw_job`).
+    /// 2. UPDATE the DLQ row's `requeued_count`, `last_requeued_at`, `notes`.
+    ///
+    /// `WorkerUtils::add_raw_job` hard-codes the pool, so we can't bundle
+    /// these into a single transaction. To prefer truthful return values,
+    /// step 2 failures are logged at WARN level rather than failing the
+    /// operation: a successful enqueue followed by a failed bookkeeping
+    /// UPDATE returns `Ok(job)` (the job IS in the queue) with a stale
+    /// `requeued_count` in the DLQ admin view. The next refresh of the row
+    /// will show the discrepancy if it matters.
     pub async fn requeue_dlq_job(&self, dlq_id: i64, notes: Option<String>) -> Result<Job, BackfillError> {
         // Get the DLQ job
         let dlq_job = self
@@ -347,7 +381,8 @@ impl BackfillClient {
         };
 
         // Record metrics
-        crate::metrics::record_dlq_job_requeued(&dlq_job.task_identifier, spec.queue.as_str());
+        // Use bounded metric_label() to keep label cardinality small.
+        crate::metrics::record_dlq_job_requeued(&dlq_job.task_identifier, spec.queue.metric_label());
 
         log::info!(
             "Job requeued from DLQ (dlq_id: {}, job_id: {}, task: {})",
@@ -368,35 +403,48 @@ impl BackfillClient {
             self.schema
         );
 
-        sqlx::query(&update_query)
+        // Bookkeeping update — see function docstring. If this fails, the
+        // job has already been re-enqueued; we return success but log so an
+        // operator can see that the DLQ row's counters didn't advance.
+        if let Err(e) = sqlx::query(&update_query)
             .bind(&notes)
             .bind(dlq_id)
             .execute(&self.pool)
-            .await?;
+            .await
+        {
+            log::warn!(
+                "DLQ row bookkeeping update failed after successful requeue \
+                 (dlq_id: {}, job_id: {}, error: {}); requeued_count/last_requeued_at \
+                 may be stale",
+                dlq_id,
+                job.id(),
+                e
+            );
+        }
 
         Ok(*job)
     }
 
     /// Delete a job from the DLQ permanently.
     pub async fn delete_dlq_job(&self, dlq_id: i64) -> Result<bool, BackfillError> {
-        // Get the job first to record task identifier in metrics
-        let task_identifier = if let Some(job) = self.get_dlq_job(dlq_id).await? {
-            Some(job.task_identifier.clone())
-        } else {
-            None
-        };
+        // Single round-trip: DELETE … RETURNING gives us the task_identifier
+        // for the metric in the same query. Returns None if the row didn't
+        // exist (no rows deleted).
+        let query = format!(
+            "DELETE FROM {}.backfill_dlq WHERE id = $1 RETURNING task_identifier",
+            self.schema
+        );
+        let task_identifier: Option<String> = sqlx::query_scalar(&query)
+            .bind(dlq_id)
+            .fetch_optional(&self.pool)
+            .await?;
 
-        let query = format!("DELETE FROM {}.backfill_dlq WHERE id = $1", self.schema);
-        let result = sqlx::query(&query).bind(dlq_id).execute(&self.pool).await?;
-
-        let deleted = result.rows_affected() > 0;
-
-        if deleted && let Some(task) = task_identifier {
-            crate::metrics::record_dlq_job_deleted(&task);
+        if let Some(task) = &task_identifier {
+            crate::metrics::record_dlq_job_deleted(task);
             log::info!("Job deleted from DLQ (dlq_id: {}, task: {})", dlq_id, task);
         }
 
-        Ok(deleted)
+        Ok(task_identifier.is_some())
     }
 
     /// Delete DLQ entries by job_key.
@@ -512,26 +560,29 @@ impl BackfillClient {
             String::new()
         };
 
-        // Use UPSERT to handle the case where a requeued job fails again.
-        // If a DLQ entry with the same job_key already exists, update it
-        // instead of creating a duplicate. This ensures one DLQ entry per
-        // logical job and keeps failed_at current for cooldown calculations.
+        // UPSERT to handle the case where a requeued job fails again. If a
+        // DLQ entry with the same job_key already exists, update it instead
+        // of creating a duplicate — keeps `failed_at` current and counts the
+        // touch in `failure_count`.
+        //
+        // `failure_count` is a count of DLQ-touch events for this logical job
+        // (1 for first DLQ landing, +1 each subsequent requeue-then-fail).
+        // It is NOT a cumulative count of handler-failure invocations.
         let upsert_query = format!(
             r#"
-            INSERT INTO {}.backfill_dlq (
+            INSERT INTO {schema}.backfill_dlq (
                 original_job_id, task_identifier, payload, queue_name, priority,
                 job_key, max_attempts, failure_reason, failure_count, last_error,
                 original_created_at, original_run_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11)
             ON CONFLICT (job_key) WHERE job_key IS NOT NULL DO UPDATE SET
                 failed_at = NOW(),
-                failure_count = {schema}.backfill_dlq.failure_count + EXCLUDED.failure_count,
+                failure_count = {schema}.backfill_dlq.failure_count + 1,
                 failure_reason = EXCLUDED.failure_reason,
                 last_error = EXCLUDED.last_error,
                 original_job_id = EXCLUDED.original_job_id
             RETURNING *
         "#,
-            self.schema,
             schema = self.schema
         );
 
@@ -544,7 +595,6 @@ impl BackfillClient {
             .bind(original_job.key())
             .bind(original_job.max_attempts())
             .bind(failure_reason)
-            .bind(original_job.attempts())
             .bind(&last_error)
             .bind(original_job.created_at())
             .bind(original_job.run_at())
@@ -574,7 +624,13 @@ impl BackfillClient {
         // Record metrics
         crate::metrics::record_db_operation("dlq_add", "success");
         crate::metrics::record_db_operation_duration("dlq_add", start.elapsed().as_secs_f64());
-        crate::metrics::record_dlq_job_added(&dlq_job.queue_name, &dlq_job.task_identifier, &dlq_job.failure_reason);
+        // Bounded label: "parallel" / "serial" rather than the raw queue name
+        // (which may be "" for parallel-origin jobs and unbounded for serial).
+        crate::metrics::record_dlq_job_added(
+            crate::metrics::queue_metric_label_from_name(&dlq_job.queue_name),
+            &dlq_job.task_identifier,
+            &dlq_job.failure_reason,
+        );
 
         log::info!(
             "Job moved to DLQ (dlq_id: {}, task: {}, failure_reason: {})",
@@ -594,23 +650,33 @@ impl BackfillClient {
     /// Returns the number of jobs moved to the DLQ.
     pub async fn process_failed_jobs(&self) -> Result<u32, BackfillError> {
         // Find jobs that have failed permanently (attempts >= max_attempts)
-        // and haven't been processed yet
+        // and aren't already in the DLQ.
+        //
+        // NOT EXISTS is preferred over NOT IN here: it scales better at large
+        // DLQ sizes (PostgreSQL can hash-anti-join), and it handles NULL
+        // values in `backfill_dlq.original_job_id` cleanly without the
+        // COALESCE workaround that NOT IN requires (NULL in a NOT IN list
+        // makes the whole predicate UNKNOWN, which silently filters
+        // everything out).
         let find_failed_jobs_query = format!(
             r#"
             SELECT jobs.id, tasks.identifier AS task_identifier,
                    job_queues.queue_name, jobs.priority, jobs.key as job_key,
                    jobs.max_attempts, jobs.attempts, jobs.last_error,
                    jobs.created_at, jobs.run_at, jobs.updated_at, jobs.payload
-            FROM {}._private_jobs AS jobs
-            INNER JOIN {}._private_tasks AS tasks ON tasks.id = jobs.task_id
-            LEFT JOIN {}._private_job_queues AS job_queues ON job_queues.id = jobs.job_queue_id
+            FROM {schema}._private_jobs AS jobs
+            INNER JOIN {schema}._private_tasks AS tasks ON tasks.id = jobs.task_id
+            LEFT JOIN {schema}._private_job_queues AS job_queues ON job_queues.id = jobs.job_queue_id
             WHERE jobs.attempts >= jobs.max_attempts
               AND jobs.max_attempts > 0
-              AND jobs.id NOT IN (SELECT COALESCE(original_job_id, -1) FROM {}.backfill_dlq)
+              AND NOT EXISTS (
+                  SELECT 1 FROM {schema}.backfill_dlq dlq
+                  WHERE dlq.original_job_id = jobs.id
+              )
             ORDER BY jobs.updated_at ASC
             LIMIT 100
         "#,
-            self.schema, self.schema, self.schema, self.schema
+            schema = self.schema
         );
 
         let failed_jobs = sqlx::query(&find_failed_jobs_query).fetch_all(&self.pool).await?;
@@ -636,17 +702,32 @@ impl BackfillClient {
             // Convert last_error from TEXT to JSONB for DLQ table
             let last_error_json = last_error.map(serde_json::Value::String);
 
-            // Move to DLQ using UPSERT to handle requeued jobs that fail again
-            let upsert_dlq_query = format!(
+            // Atomic DELETE + UPSERT in a single statement using a writable
+            // CTE. Either the row is gone from `_private_jobs` AND in
+            // `backfill_dlq`, or neither happened — no partial-failure window
+            // where the job ends up in both tables. The INSERT's SELECT
+            // sources from `deleted`, so when DELETE finds nothing
+            // (e.g., another worker already moved the row) the INSERT runs
+            // zero times.
+            // failure_count semantics: count of DLQ-touch events for this job
+            // (1 on first move, +1 each subsequent requeue-fail). See
+            // DlqJob::failure_count docstring.
+            let move_query = format!(
                 r#"
+                WITH deleted AS (
+                    DELETE FROM {schema}._private_jobs WHERE id = $1 RETURNING 1
+                )
                 INSERT INTO {schema}.backfill_dlq (
                     original_job_id, task_identifier, payload, queue_name, priority,
                     job_key, max_attempts, failure_reason, failure_count, last_error,
                     original_created_at, original_run_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                )
+                SELECT $1::bigint, $2::text, $3::jsonb, $4::text, $5::int, $6::text,
+                       $7::int, $8::text, 1, $9::jsonb, $10::timestamptz, $11::timestamptz
+                FROM deleted
                 ON CONFLICT (job_key) WHERE job_key IS NOT NULL DO UPDATE SET
                     failed_at = NOW(),
-                    failure_count = {schema}.backfill_dlq.failure_count + EXCLUDED.failure_count,
+                    failure_count = {schema}.backfill_dlq.failure_count + 1,
                     failure_reason = EXCLUDED.failure_reason,
                     last_error = EXCLUDED.last_error,
                     original_job_id = EXCLUDED.original_job_id
@@ -656,52 +737,45 @@ impl BackfillClient {
 
             let failure_reason = format!("Job exceeded maximum retry attempts ({}/{})", attempts, max_attempts);
 
-            let upsert_result = sqlx::query(&upsert_dlq_query)
+            let move_result = sqlx::query(&move_query)
                 .bind(job_id)
                 .bind(&task_identifier)
                 .bind(&payload)
                 .bind(&queue_name)
-                .bind(priority)
+                .bind(priority as i32)
                 .bind(&job_key)
                 .bind(max_attempts as i32)
                 .bind(failure_reason)
-                .bind(attempts as i32)
                 .bind(&last_error_json)
                 .bind(created_at)
                 .bind(run_at)
                 .execute(&self.pool)
                 .await;
 
-            match upsert_result {
+            match move_result {
+                Ok(result) if result.rows_affected() > 0 => {
+                    moved_count += 1;
+                    log::info!(
+                        "Successfully moved failed job to DLQ (job_id: {}, task: {}, attempts: {}/{})",
+                        job_id,
+                        task_identifier,
+                        attempts,
+                        max_attempts
+                    );
+                }
                 Ok(_) => {
-                    // Successfully moved to DLQ, now remove from main jobs table
-                    let delete_query = format!("DELETE FROM {}._private_jobs WHERE id = $1", self.schema);
-                    match sqlx::query(&delete_query).bind(job_id).execute(&self.pool).await {
-                        Ok(_) => {
-                            moved_count += 1;
-                            log::info!(
-                                "Successfully moved failed job to DLQ (job_id: {}, task: {}, attempts: {}/{})",
-                                job_id,
-                                task_identifier,
-                                attempts,
-                                max_attempts
-                            );
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "Failed to delete job from main table after DLQ insertion (job_id: {}, task: {}, error: {})",
-                                job_id,
-                                task_identifier,
-                                e
-                            );
-                            // Consider this a partial failure - job is in DLQ
-                            // but also still in main table
-                        }
-                    }
+                    // DELETE found no row — likely another worker beat us to
+                    // it. Not a problem; the job either already reached DLQ
+                    // via the other worker or is still progressing normally.
+                    log::debug!(
+                        "DLQ move skipped (job_id: {}, task: {}); row no longer present in _private_jobs",
+                        job_id,
+                        task_identifier
+                    );
                 }
                 Err(e) => {
                     log::error!(
-                        "Failed to insert job into DLQ (job_id: {}, task: {}, error: {})",
+                        "Failed to move job to DLQ (job_id: {}, task: {}, error: {})",
                         job_id,
                         task_identifier,
                         e
@@ -719,14 +793,17 @@ impl BackfillClient {
 
     /// Process failed jobs continuously in a background task.
     ///
-    /// This spawns a background task that periodically scans for failed jobs
-    /// and moves them to the DLQ. The task runs until the provided cancellation
-    /// token is triggered.
+    /// Spawns a background task that periodically scans for failed jobs and
+    /// moves them to the DLQ. Runs until the cancellation token is triggered.
+    ///
+    /// On consecutive errors the wait between scans grows exponentially —
+    /// `interval`, `2*interval`, `4*interval`, … capped at `32*interval` —
+    /// so a transient outage doesn't produce log spam at fixed cadence.
+    /// On any successful scan the wait resets to `interval`.
     ///
     /// # Arguments
-    /// * `interval` - How often to scan for failed jobs
-    /// * `cancellation_token` - Token to signal when to stop the background
-    ///   task
+    /// * `interval` - How often to scan for failed jobs (steady state)
+    /// * `cancellation_token` - Signals when to stop the background task
     ///
     /// # Returns
     /// A JoinHandle for the background task
@@ -735,36 +812,56 @@ impl BackfillClient {
         interval: std::time::Duration,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
+        // 2^5 = 32x interval cap. With the default 60s interval that's ~32min
+        // between attempts under sustained failure, which is far enough apart
+        // to be quiet but close enough to still recover quickly when the
+        // underlying issue clears.
+        const MAX_BACKOFF_SHIFT: u32 = 5;
+
         let client = self.clone();
 
         tokio::spawn(async move {
-            let mut interval_timer = tokio::time::interval(interval);
-            interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
             log::info!(
                 "Starting DLQ processor background task (interval_seconds: {})",
                 interval.as_secs()
             );
 
+            let mut consecutive_errors: u32 = 0;
+
             loop {
+                // Run the scan first (immediate on first iteration, then after
+                // each subsequent wait — matches the prior tokio::interval
+                // behaviour where the first tick fires at t=0).
+                let mut next_wait = interval;
+                match client.process_failed_jobs().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            log::info!("DLQ processor moved failed jobs (moved_jobs: {})", count);
+                        }
+                        consecutive_errors = 0;
+                    }
+                    Err(e) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                        let shift = consecutive_errors.min(MAX_BACKOFF_SHIFT);
+                        let factor = 1u32 << shift;
+                        next_wait = interval * factor;
+                        log::error!(
+                            "DLQ processor encountered error (consecutive: {}, next attempt in: {:?}): {}",
+                            consecutive_errors,
+                            next_wait,
+                            e
+                        );
+                    }
+                }
+
+                // Wait or shut down. Cancellation always wins ties.
                 tokio::select! {
+                    biased;
                     _ = cancellation_token.cancelled() => {
                         log::info!("DLQ processor shutting down");
                         break;
                     }
-                    _ = interval_timer.tick() => {
-                        match client.process_failed_jobs().await {
-                            Ok(count) if count > 0 => {
-                                log::info!("DLQ processor moved failed jobs (moved_jobs: {})", count);
-                            }
-                            Ok(_) => {
-                                // No jobs moved, no need to log
-                            }
-                            Err(e) => {
-                                log::error!("DLQ processor encountered error: {}", e);
-                            }
-                        }
-                    }
+                    _ = tokio::time::sleep(next_wait) => {}
                 }
             }
         })

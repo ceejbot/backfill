@@ -880,16 +880,21 @@ The DLQ system is fully functional for production use, but has a few known limit
 
 ### 1. Queue Name Tracking
 
-**Issue**: DLQ entries may show `queue_name` as `"default"` even if the job ran in a different queue (e.g., "fast" or "bulk").
+**Status**: Fixed in v1.1.1 (PR #9).
 
-**Cause**: The GraphileWorker `Job` struct doesn't expose the queue name field, so when jobs are moved to the DLQ, the queue name defaults to `"default"`.
+DLQ entries now correctly preserve the queue type of the original job:
 
-**Workarounds**:
-- The `task_identifier` field is always accurate and can be used for filtering
-- Job priority is preserved, which often correlates with queue assignment
-- For critical workflows, track queue assignment in your application logs or metrics
+- Parallel jobs (`Queue::Parallel`) are stored with an empty `queue_name`.
+  When requeued, they go back to `Queue::Parallel` — concurrent execution
+  is preserved.
+- Serial jobs (`Queue::Serial(name)`) are stored with their queue name.
+  When requeued, they go back to `Queue::Serial(name)` — single-job-at-a-
+  time semantics are preserved.
 
-**Future**: This will be resolved when GraphileWorker exposes queue_name on the Job struct, or when we implement direct database querying.
+The DDL retains a `DEFAULT 'default'` clause for the `queue_name` column for
+schema compatibility, but it is never used by the production code path —
+`add_to_dlq` and `process_failed_jobs` always pass an explicit value
+(possibly the empty string for parallel jobs).
 
 ### 2. Payload Visibility
 
@@ -929,7 +934,7 @@ These limitations are minor and don't affect the core DLQ functionality:
 - ✅ **Error message capture** - Fully functional
 - ✅ **Requeuing workflows** - Production-ready
 - ✅ **Statistics and monitoring** - Complete
-- ⚠️ **Queue name tracking** - Shows "default" for all queues
+- ✅ **Queue name tracking** - Fixed in v1.1.1 (parallel ↔ serial round-trip preserved)
 - ⚠️ **Payload inspection** - Requires direct DB access
 - ⚠️ **Job cancellation** - Not yet implemented
 

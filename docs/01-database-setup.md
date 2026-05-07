@@ -218,7 +218,21 @@ let client = BackfillClient::new_with_schema(&url, \"app1_jobs\").await?;
 let client = BackfillClient::new_with_schema(&url, \"app2_jobs\").await?;
 ```
 
-## SQLx Compile-Time Query Verification
+## SQLx usage
+
+> **Note on backfill itself**: backfill uses runtime SQLx queries
+> (`sqlx::query()` and friends) rather than the compile-time
+> `sqlx::query!()` macros. This is a deliberate choice — backfill's SQL
+> targets dynamic schema names (the user's chosen schema, not a fixed
+> identifier), which the compile-time macros don't support cleanly. So
+> `DATABASE_URL` is **not** required at compile time, there is no `.sqlx/`
+> metadata to maintain, and schema mismatches surface at runtime (the
+> integration test suite is the safety net).
+>
+> The setup below is a recommendation for **your own** queries against
+> backfill's tables, in code you write that uses SQLx. If you don't write
+> any `sqlx::query!()` / `sqlx::query_as!()` macros yourself, you can
+> skip this section.
 
 This library uses SQLx for all database operations, which provides excellent compile-time verification of SQL queries. This is one of Rust's greatest strengths for database applications.
 

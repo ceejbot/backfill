@@ -5,6 +5,126 @@ All notable changes to the Backfill project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project will adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) after reaching version 1.0.0.
 
+## [1.2.0] — Production-readiness audit
+
+A focused bug-fix release driven by a top-to-bottom production-readiness
+review of the priority queue, retry, and DLQ subsystems. Several silent
+failure modes are corrected, several misleading APIs are deprecated with
+migration paths, and two long-tail correctness bugs in the DLQ subsystem
+are fixed. Every fix is covered by a regression test that fails on the
+prior code.
+
+### Critical fixes
+
+- **DLQ no longer loses jobs on worker restart.** `WorkerRunner` startup
+  used to call `cleanup_permanently_failed_jobs()` (which `DELETE`s rows
+  with `attempts >= max_attempts`) before the DLQ processor's first tick
+  — any job that hit max_attempts while the worker was down was silently
+  deleted instead of captured. The startup sequence now runs
+  `process_failed_jobs()` synchronously before cleanup whenever the DLQ
+  is enabled.
+- **`WorkerError::is_retryable()` is now wired to actual retry behaviour.**
+  The classification was previously dead code; a `WorkerError::ValidationFailed`
+  would retry up to `max_attempts` instead of going straight to DLQ.
+  A new `PermanentFailurePlugin` (auto-registered when DLQ is enabled)
+  hooks `JobFail`, classifies the error, and short-circuits retries for
+  non-retryable variants by setting `attempts = max_attempts`.
+- **`process_failed_jobs` now atomically moves rows from `_private_jobs` to
+  the DLQ.** Previously the UPSERT and DELETE were separate statements; a
+  crash between them could duplicate the job. Combined into a single
+  writable-CTE statement.
+
+### Breaking changes
+
+- `WorkerRunner::process_available_jobs` returns `Result<(), BackfillError>`
+  (was `Result<usize, BackfillError>` always returning `Ok(0)`). For
+  job-count instrumentation, register a `JobComplete` / `JobFail` plugin
+  before building the worker.
+- `WorkerRunner::worker_count()` returns `1` truthfully (was
+  `queue_configs.len()`, which lied any time multi-queue config was passed
+  — only one worker has ever actually been spawned).
+
+### Deprecations
+
+All marked `#[deprecated(since = "1.2.0")]` with migration notes.
+Scheduled for removal in `2.0.0`.
+
+- `RetryPolicy::new(4-arg)`, `with_jitter`, `calculate_delay`,
+  `calculate_retry_time`, `JobSpec::calculate_retry_time` — graphile_worker
+  uses a hard-coded `exp(min(attempts, 10))`-second SQL formula for retry
+  scheduling, so the timing fields on `RetryPolicy` and the math helpers
+  that operated on them never reached the worker. Only `max_attempts` was
+  ever honored. Use `RetryPolicy { max_attempts: n, ..Default::default() }`
+  or the `fast` / `aggressive` / `conservative` presets, which now
+  differ only in attempt count.
+- `WorkerConfig::with_queues`, `QueueConfig::named_queue`,
+  `QueueConfig::priority_queue` — graphile_worker doesn't expose
+  per-worker queue filtering; only the first config's `concurrency`
+  was ever used at runtime, and `priority_range` was never read. Use
+  `WorkerConfig::with_concurrency(n)` and route jobs to named queues at
+  enqueue time via `Queue::serial(name)`.
+
+### Other fixes and improvements
+
+- `list_dlq_jobs.total` now respects filters (was returning unfiltered
+  count regardless of filter, breaking paginated admin UIs).
+- `Queue::metric_label()` added — bounded `"parallel"`/`"serial"` label
+  for built-in metrics. Built-in metric emission no longer uses
+  unbounded queue names (e.g., `Queue::serial_for("user", id)`) as
+  Prometheus labels.
+- DLQ-side metrics emit `"parallel"` instead of empty string for
+  parallel-origin jobs.
+- `requeue_dlq_job` no longer fails the operation when the post-enqueue
+  bookkeeping `UPDATE` blips; the enqueue (the real intent) succeeded,
+  so a stale `requeued_count` is logged at `WARN` rather than propagated
+  as an error.
+- DLQ processor uses exponential backoff on consecutive errors
+  (interval, 2x, 4x, … capped at 32x). Resets on success.
+- `process_failed_jobs` switched from `id NOT IN (subquery)` to
+  `NOT EXISTS` for the DLQ-membership check — better planner behaviour
+  and no NULL-poisoning workaround needed.
+- `failure_count` on DLQ rows is now a clean touch counter (1 on first
+  DLQ landing, +1 each subsequent UPSERT) instead of cumulative
+  handler-attempts.
+- `cleanup_permanently_failed_jobs` now logs at `WARN` when DLQ is
+  disabled (those jobs cannot be recovered) and `INFO` when DLQ exists.
+- `delete_dlq_job` halved its DB round-trips (single `DELETE … RETURNING`).
+- `enqueue` records duration on every outcome, not just success.
+- Stale-lock SQL parameterized instead of format-interpolating timeout.
+- `enqueue_emergency` no longer redundantly sets `run_at = NOW()`.
+
+### Documentation
+
+- Truthful `RetryPolicy` rustdoc — explicit about which fields graphile_worker
+  honors and which are stored-but-ignored.
+- `EnqueueOutcome::AlreadyInProgress` rustdoc rewritten to flag the
+  footgun of unconditionally `.unwrap()`ing.
+- `docs/01-database-setup.md` clarifies that backfill itself uses runtime
+  SQLx queries; the offline-mode setup is for *user* queries.
+- `docs/02-dlq.md` "queue_name shows as default" warning marked resolved
+  (was fixed in 1.1.1 / PR #9, docs were stale).
+- `Cargo.toml` warns about the `_private_*` schema coupling so
+  `cargo update` doesn't silently break across graphile_worker patch
+  releases.
+- `lib.rs` documents which `graphile_worker` types are re-exported and
+  the SemVer implications of upstream changes.
+
+### Internals
+
+- Removed orphan `src/client/queries.rs` (was never `mod`-declared).
+- Removed empty `.sqlx/sqlx-data.json` (compile-time query macros aren't
+  used).
+
+### Tests
+
+- Test count: 107 → 115 (+8). New regression tests for the startup race,
+  the retryable / non-retryable plugin behaviour, the filtered-pagination
+  fix, the failure_count touch counter, the bounded metric label, an
+  end-to-end retry-to-DLQ path through the actual worker, and a
+  concurrent-enqueue stress test.
+- All P0 and P1 fixes were verified to *fail* on the prior code via
+  `git stash` / re-run before being committed.
+
 ## [Unreleased]
 
 ### Breaking Changes

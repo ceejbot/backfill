@@ -95,14 +95,18 @@ impl BackfillClient {
             .add_raw_job(task_identifier, serde_json::to_value(payload)?, spec.clone().into())
             .await;
 
+        // Record duration once for every outcome — success, already-in-progress,
+        // and error — so the histogram isn't biased toward fast successes.
+        crate::metrics::record_db_operation_duration("enqueue", start.elapsed().as_secs_f64());
+
         match result {
             Ok(job) => {
-                // Record successful enqueue
                 crate::metrics::record_db_operation("enqueue", "success");
-                crate::metrics::record_db_operation_duration("enqueue", start.elapsed().as_secs_f64());
 
-                // Record job enqueued metric
-                crate::metrics::record_job_enqueued(spec.queue.as_str(), task_identifier, spec.priority.0);
+                // Record job enqueued metric. Use the bounded `metric_label()`
+                // (either "parallel" or "serial") to avoid exploding the label
+                // cardinality when callers use `Queue::serial_for(entity, id)`.
+                crate::metrics::record_job_enqueued(spec.queue.metric_label(), task_identifier, spec.priority.0);
 
                 log::debug!(
                     "Job enqueued (job_id: {}, task: {}, queue: {}, priority: {})",
@@ -120,10 +124,9 @@ impl BackfillClient {
                 if is_row_not_found(&e) && job_key.is_some() {
                     // Job with this key is already locked/in progress
                     crate::metrics::record_db_operation("enqueue", "already_in_progress");
-                    crate::metrics::record_db_operation_duration("enqueue", start.elapsed().as_secs_f64());
 
-                    // Record the already_in_progress metric
-                    crate::metrics::record_job_already_in_progress(spec.queue.as_str(), task_identifier);
+                    // Record the already_in_progress metric (bounded label)
+                    crate::metrics::record_job_already_in_progress(spec.queue.metric_label(), task_identifier);
 
                     let key = job_key.clone().unwrap_or_else(|| "<unknown>".to_string());
                     log::debug!(

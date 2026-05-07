@@ -89,6 +89,15 @@ pub(crate) fn record_job_already_in_progress(queue: &str, task: &str) {
     .increment(1);
 }
 
+/// Convert a stored DLQ `queue_name` (which may be "" for parallel-origin
+/// jobs) into a bounded metric label of either `"parallel"` or `"serial"`.
+///
+/// Mirrors [`crate::Queue::metric_label`] but operates on the post-storage
+/// string form used by `DlqJob.queue_name`.
+pub(crate) fn queue_metric_label_from_name(queue_name: &str) -> &'static str {
+    if queue_name.is_empty() { "parallel" } else { "serial" }
+}
+
 /// Record a job being added to DLQ
 pub(crate) fn record_dlq_job_added(queue: &str, task: &str, reason: &str) {
     metrics::counter!(

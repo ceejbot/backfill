@@ -1208,3 +1208,69 @@ async fn test_mixed_parallel_and_serial_jobs() -> Result<()> {
     })
     .await
 }
+
+/// Concurrent enqueue stress test (test gap from §6 of the review).
+///
+/// Spawns multiple tokio tasks each enqueueing a batch of jobs in parallel.
+/// Verifies that:
+/// - Every enqueue returns success (no deadlocks, no SQL errors).
+/// - All jobs land in `_private_jobs` (no lost rows).
+/// - Multiple workers/clients can hammer the enqueue path simultaneously
+///   without serializing on database locks.
+///
+/// This is the kind of regression test that would catch race conditions
+/// or contention bugs introduced by future changes to the enqueue path
+/// or to graphile_worker's add_job SQL.
+#[tokio::test]
+async fn test_concurrent_enqueue_under_load() -> Result<()> {
+    with_isolated_schema(|client| async move {
+        const TASKS: usize = 10;
+        const JOBS_PER_TASK: usize = 50;
+        const TOTAL: usize = TASKS * JOBS_PER_TASK;
+
+        // Fan out: each task enqueues JOBS_PER_TASK jobs serially within
+        // itself, but TASKS tasks run concurrently against the same pool.
+        let mut handles = Vec::with_capacity(TASKS);
+        for task_id in 0..TASKS {
+            let client = client.clone();
+            let handle = tokio::spawn(async move {
+                let mut enqueued = 0usize;
+                for job_id in 0..JOBS_PER_TASK {
+                    let payload = TestJob {
+                        message: format!("stress-{task_id}-{job_id}"),
+                        number: (task_id * JOBS_PER_TASK + job_id) as i32,
+                    };
+                    let outcome = client.enqueue("stress_job", &payload, JobSpec::default()).await?;
+                    if outcome.is_enqueued() {
+                        enqueued += 1;
+                    }
+                }
+                Ok::<usize, BackfillError>(enqueued)
+            });
+            handles.push(handle);
+        }
+
+        // Collect results — any task panic or task error fails the test.
+        let mut total_enqueued = 0usize;
+        for handle in handles {
+            let count = handle
+                .await
+                .map_err(|e| BackfillError::WorkerRuntime(format!("task join failed: {e}")))??;
+            total_enqueued += count;
+        }
+        assert_eq!(total_enqueued, TOTAL, "every concurrent enqueue must succeed");
+
+        // Verify every row landed in _private_jobs.
+        let row_count: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
+            .fetch_one(client.pool())
+            .await?;
+        assert_eq!(
+            row_count.0 as usize, TOTAL,
+            "all {} jobs must be persisted in _private_jobs",
+            TOTAL
+        );
+
+        Ok(())
+    })
+    .await
+}
