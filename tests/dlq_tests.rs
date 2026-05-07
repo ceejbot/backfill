@@ -1,8 +1,11 @@
 //! Dead Letter Queue integration tests
 
-use backfill::{BackfillClient, BackfillError, DlqFilter, JobSpec, Priority, Queue};
+use std::time::Duration;
+
+use backfill::{BackfillClient, BackfillError, DlqFilter, JobSpec, Priority, Queue, WorkerConfig, WorkerRunner};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -699,4 +702,116 @@ async fn test_dlq_with_different_priorities() {
     assert!(priorities.contains(&-20)); // EMERGENCY
     assert!(priorities.contains(&-10)); // FAST_HIGH
     assert!(priorities.contains(&5)); // BULK_LOW
+}
+
+/// Regression test for the DLQ-vs-cleanup startup race (P0-1).
+///
+/// Before the fix, `WorkerRunner::run_until_cancelled` called
+/// `startup_cleanup_with_timeouts` first, which DELETEs rows from `_private_jobs`
+/// where `attempts >= max_attempts`. The DLQ processor was supposed to capture
+/// those same rows, but it ran as a periodic background task that hadn't ticked
+/// yet at startup. Net effect: jobs that hit max_attempts while the worker was
+/// down (or in the gap before the next DLQ tick) were silently deleted.
+///
+/// The fix runs `process_failed_jobs()` synchronously before cleanup when DLQ
+/// is enabled. This test stages a permanently-failed job, runs the actual
+/// worker startup path (`run_until_cancelled` via `spawn_background`), and
+/// asserts the job lands in DLQ instead of being deleted.
+#[tokio::test]
+async fn test_worker_startup_moves_failed_jobs_to_dlq_before_cleanup() {
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://localhost/backfill_test".to_string());
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("connect to test database");
+
+    let schema = format!("test_dlq_startup_capture_{}", Uuid::new_v4().simple());
+    let client = BackfillClient::with_pool_and_schema(pool.clone(), schema.clone())
+        .await
+        .expect("create client");
+    client.init_dlq().await.expect("init DLQ");
+
+    // Stage a job that will look "permanently failed" to the DLQ scanner.
+    let test_job = TestJob {
+        message: "must reach DLQ on worker startup".to_string(),
+        number: 4242,
+    };
+    let outcome = client
+        .enqueue(
+            "test_job",
+            &test_job,
+            JobSpec {
+                max_attempts: Some(3),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enqueue");
+    let job = outcome.unwrap();
+    let job_id = *job.id();
+
+    // Force `attempts = max_attempts` to simulate a job that exhausted retries
+    // before the previous worker shut down.
+    sqlx::query(&format!(
+        "UPDATE {}._private_jobs SET attempts = max_attempts WHERE id = $1",
+        schema
+    ))
+    .bind(job_id)
+    .execute(&pool)
+    .await
+    .expect("stage permanent failure");
+
+    // Sanity check: not in DLQ yet, still in main table.
+    let dlq_pre = client
+        .list_dlq_jobs(DlqFilter::default())
+        .await
+        .expect("list DLQ pre");
+    assert_eq!(dlq_pre.jobs.len(), 0, "DLQ should be empty before worker startup");
+
+    // Build and run a real WorkerRunner. The DLQ processor's tick interval is
+    // long enough that we know the only thing that can move the job to DLQ
+    // during this test window is the synchronous startup pre-move.
+    let config = WorkerConfig::new(database_url)
+        .with_schema(schema.clone())
+        .with_poll_interval(Duration::from_millis(50))
+        .with_dlq_processor_interval(Some(Duration::from_secs(60)));
+    let worker = WorkerRunner::builder(config)
+        .await
+        .expect("build runner")
+        .build()
+        .await
+        .expect("build worker");
+
+    let token = CancellationToken::new();
+    let handle = worker.spawn_background(token.clone());
+
+    // Give startup enough time to run the pre-move + cleanup sequence.
+    // (No background DLQ tick will fire — we set the interval to 60s.)
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    token.cancel();
+    let _ = handle.await;
+
+    // Verify: the job is in DLQ, not deleted.
+    let dlq_post = client
+        .list_dlq_jobs(DlqFilter::default())
+        .await
+        .expect("list DLQ post");
+    assert_eq!(
+        dlq_post.jobs.len(),
+        1,
+        "permanently-failed job must reach DLQ during worker startup, not be deleted by cleanup"
+    );
+    let dlq_job = &dlq_post.jobs[0];
+    assert_eq!(dlq_job.original_job_id, Some(job_id));
+    assert_eq!(dlq_job.task_identifier, "test_job");
+
+    // Cleanup
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+        .execute(&pool)
+        .await
+        .ok();
+    pool.close().await;
 }

@@ -134,9 +134,25 @@ impl BackfillClient {
     /// remain in the main queue with `is_available = false`. These jobs
     /// will never be processed again and should be cleaned up.
     ///
-    /// Note: These jobs should already be captured to the DLQ by the task
-    /// handler or DLQ processor before reaching this state. This function
-    /// removes the leftover rows from the main queue.
+    /// # Important: ordering with the DLQ
+    ///
+    /// **This function deletes the same rows the DLQ processor uses as input.**
+    /// If you call it before `process_failed_jobs()` has captured those rows
+    /// into the DLQ, those jobs are lost forever — they leave the main queue
+    /// without ever reaching the DLQ.
+    ///
+    /// Safe usage when DLQ is enabled:
+    /// 1. Call `process_failed_jobs()` first (moves rows into DLQ).
+    /// 2. Then call this function (cleans up anything the DLQ processor
+    ///    chose not to move — typically jobs with `max_attempts = 0`, which
+    ///    the DLQ processor explicitly skips).
+    ///
+    /// `WorkerRunner::run_until_cancelled` already enforces this ordering at
+    /// startup. Direct callers (ad-hoc maintenance scripts, etc.) must enforce
+    /// it themselves.
+    ///
+    /// If DLQ is disabled, this function is the only cleanup mechanism and will
+    /// silently delete failed jobs — that is by design.
     ///
     /// # Returns
     /// Number of permanently failed jobs that were deleted
@@ -185,6 +201,14 @@ impl BackfillClient {
     ///
     /// This allows configuring the stale lock thresholds for environments
     /// where the defaults aren't appropriate.
+    ///
+    /// # DLQ ordering note
+    ///
+    /// This calls `cleanup_permanently_failed_jobs()`, which DELETEs rows from
+    /// `_private_jobs` where `attempts >= max_attempts`. If you run a DLQ,
+    /// **call `process_failed_jobs()` first** so those rows reach the DLQ
+    /// before they're deleted. `WorkerRunner::run_until_cancelled` does this
+    /// automatically; direct callers must do it themselves.
     ///
     /// # Arguments
     /// * `queue_lock_timeout` - Timeout for queue locks (normally held for ms)

@@ -667,6 +667,42 @@ impl WorkerRunner {
             self.config.stale_lock_cleanup_interval.is_some()
         );
 
+        // Move permanently-failed jobs to the DLQ BEFORE startup cleanup runs.
+        //
+        // `startup_cleanup_with_timeouts()` calls `cleanup_permanently_failed_jobs()`
+        // which deletes rows from `_private_jobs` where `attempts >= max_attempts`.
+        // The DLQ processor uses the SAME predicate to find candidates to move into
+        // the DLQ — but it runs as a periodic background task that hasn't ticked yet
+        // at startup. Without this pre-move, any job that hit `max_attempts` while
+        // the worker was down (or in the gap between final failure and the next
+        // DLQ-processor tick on the previous run) would be silently deleted by
+        // cleanup before it reached the DLQ.
+        //
+        // We only run this when DLQ is enabled. If the user opted out of DLQ via
+        // `dlq_processor_interval = None`, they've explicitly chosen the
+        // delete-failed-jobs behaviour and we leave it intact.
+        if self.config.dlq_processor_interval.is_some() {
+            match self.client.process_failed_jobs().await {
+                Ok(moved) if moved > 0 => {
+                    log::info!(
+                        "Pre-cleanup DLQ move captured permanently-failed jobs (moved: {})",
+                        moved
+                    );
+                }
+                Ok(_) => {
+                    // No failed jobs waiting; nothing to capture.
+                }
+                Err(e) => {
+                    // If this fails, the next call to startup_cleanup may delete the
+                    // affected jobs. We log loudly so an operator can investigate.
+                    log::error!(
+                        "Pre-cleanup DLQ move failed; jobs may be lost when cleanup runs: {}",
+                        e
+                    );
+                }
+            }
+        }
+
         // Run startup cleanup with configured timeouts
         if let Err(e) = self
             .client
