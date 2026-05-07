@@ -13,7 +13,7 @@
 //!
 //! ## Kubernetes-style `select!` Integration
 //! ```rust,no_run
-//! use backfill::{WorkerRunner, WorkerConfig, QueueConfig, TaskHandler, WorkerContext, IntoTaskHandlerResult};
+//! use backfill::{WorkerRunner, WorkerConfig, TaskHandler, WorkerContext, IntoTaskHandlerResult};
 //! use tokio_util::sync::CancellationToken;
 //! use std::time::Duration;
 //! use serde::{Deserialize, Serialize};
@@ -100,87 +100,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{BackfillClient, BackfillError, Plugin, TaskHandler, WorkerOptions};
 
-// Re-export for use in wrapper
-/// Configuration for a worker queue.
+/// Flexible worker configuration for integration with existing applications.
 ///
-/// **Currently only `concurrency` is honored.** `name` and `priority_range`
-/// were intended for multi-queue worker setups, but graphile_worker's
-/// `WorkerOptions` doesn't expose per-worker queue filtering, so a single
-/// `WorkerRunner` runs exactly one worker and consumes only the first
-/// `QueueConfig` in `WorkerConfig::queue_configs`. To run multiple workers
-/// with different queue specializations, spawn multiple `WorkerRunner`s.
-#[derive(Debug, Clone)]
-pub struct QueueConfig {
-    /// Queue name (None for default queue). **Not honored** — the worker
-    /// processes jobs from any queue regardless of this field.
-    pub name: Option<String>,
-    /// Number of concurrent jobs to process. **Honored.**
-    pub concurrency: usize,
-    /// Priority range for jobs in this queue. **Not honored** — the worker
-    /// fetches by priority order with no range filter.
-    pub priority_range: Option<(i32, i32)>,
-}
-
-impl QueueConfig {
-    /// Create configuration for the default queue with the given concurrency.
-    ///
-    /// This is the only `QueueConfig` constructor where every field is
-    /// actually honored at runtime.
-    pub fn default_queue(concurrency: usize) -> Self {
-        Self {
-            name: None,
-            concurrency,
-            priority_range: None,
-        }
-    }
-
-    /// Create configuration for a named queue.
-    ///
-    /// **Deprecated**: the `name` field is not honored at worker startup —
-    /// graphile_worker's `WorkerOptions` doesn't filter jobs by queue. Use
-    /// [`WorkerConfig::with_concurrency`] instead, and route jobs to
-    /// specific named queues at enqueue time via `Queue::serial(name)`.
-    #[deprecated(
-        since = "1.2.0",
-        note = "queue name is not honored by graphile_worker's WorkerOptions; use WorkerConfig::with_concurrency \
-                and route jobs to named queues at enqueue time via Queue::serial(name)"
-    )]
-    pub fn named_queue(name: impl Into<String>, concurrency: usize) -> Self {
-        Self {
-            name: Some(name.into()),
-            concurrency,
-            priority_range: None,
-        }
-    }
-
-    /// Create configuration for a priority-based queue.
-    ///
-    /// **Deprecated**: neither `name` nor `priority_range` is honored at
-    /// runtime. The worker fetches jobs by priority order (lower number
-    /// first) regardless of any range configured here. Use
-    /// [`WorkerConfig::with_concurrency`] instead.
-    #[deprecated(
-        since = "1.2.0",
-        note = "priority_range is never honored by the worker fetch loop; this constructor stores values that are dead. Use WorkerConfig::with_concurrency."
-    )]
-    pub fn priority_queue(name: impl Into<String>, concurrency: usize, min_priority: i32, max_priority: i32) -> Self {
-        Self {
-            name: Some(name.into()),
-            concurrency,
-            priority_range: Some((min_priority, max_priority)),
-        }
-    }
-}
-
-/// Flexible worker configuration for integration with existing applications
+/// `WorkerRunner` always spawns exactly one graphile_worker `Worker`. To run
+/// multiple specialized workers, spawn multiple `WorkerRunner` instances
+/// yourself. Per-job queue routing happens at enqueue time via
+/// [`Queue::serial(name)`](crate::Queue::serial); it is *not* configured at
+/// the worker level — graphile_worker's `WorkerOptions` doesn't expose a
+/// queue filter.
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     /// PostgreSQL database connection URL
     pub database_url: String,
     /// GraphileWorker schema name (default: "graphile_worker")
     pub schema: String,
-    /// Queue configurations - each queue will run with its own concurrency
-    pub queue_configs: Vec<QueueConfig>,
+    /// Number of concurrent jobs the worker can run at once.
+    pub concurrency: usize,
     /// How often to poll for new jobs
     pub poll_interval: Duration,
     /// How often to process failed jobs into DLQ (None to disable)
@@ -209,7 +144,7 @@ impl Default for WorkerConfig {
         Self {
             database_url: "postgresql://localhost:5432/backfill".to_string(),
             schema: "graphile_worker".to_string(),
-            queue_configs: vec![QueueConfig::default_queue(10)],
+            concurrency: 10,
             poll_interval: Duration::from_millis(200),
             dlq_processor_interval: Some(Duration::from_secs(60)),
             stale_lock_cleanup_interval: Some(DEFAULT_STALE_LOCK_CLEANUP_INTERVAL),
@@ -241,23 +176,7 @@ impl WorkerConfig {
     /// parallel. To run multiple specialized workers, spawn multiple
     /// `WorkerRunner` instances yourself.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.queue_configs = vec![QueueConfig::default_queue(concurrency)];
-        self
-    }
-
-    /// Set queue configurations.
-    ///
-    /// **Deprecated**: only the first `QueueConfig`'s `concurrency` is
-    /// honored — graphile_worker's `WorkerOptions` doesn't expose
-    /// per-worker queue filtering, so subsequent configs are ignored. Use
-    /// [`Self::with_concurrency`] instead. Route jobs to named queues at
-    /// enqueue time via `Queue::serial(name)`.
-    #[deprecated(
-        since = "1.2.0",
-        note = "only the first QueueConfig's concurrency is honored; use with_concurrency() and route via Queue::serial(name) at enqueue time"
-    )]
-    pub fn with_queues(mut self, queues: Vec<QueueConfig>) -> Self {
-        self.queue_configs = queues;
+        self.concurrency = concurrency;
         self
     }
 
@@ -362,7 +281,6 @@ pub struct WorkerOptionsBuilder {
     pub(crate) poll_interval: Duration,
     pub(crate) pool: sqlx::PgPool,
     pub(crate) concurrency: usize,
-    pub(crate) queue_name: Option<String>,
     pub(crate) job_handlers: Vec<JobHandlerConfig>,
     pub(crate) crontabs: Vec<String>,
 }
@@ -390,18 +308,11 @@ impl WorkerOptionsBuilder {
             client.init_dlq().await?;
         }
 
-        // Use the first queue config for concurrency, or default
-        let concurrency = config.queue_configs.first().map(|q| q.concurrency).unwrap_or(10);
-
-        // Use the first queue's name if specified
-        let queue_name = config.queue_configs.first().and_then(|q| q.name.clone());
-
         Ok(Self {
             schema: config.schema.clone(),
             poll_interval: config.poll_interval,
             pool: client.pool().clone(),
-            concurrency,
-            queue_name,
+            concurrency: config.concurrency,
             job_handlers: Vec::new(),
             crontabs: Vec::new(),
         })
@@ -423,12 +334,6 @@ impl WorkerOptionsBuilder {
     /// Set the concurrency for this worker
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency;
-        self
-    }
-
-    /// Set the queue name for this worker
-    pub fn with_queue_name(mut self, queue_name: Option<String>) -> Self {
-        self.queue_name = queue_name;
         self
     }
 
@@ -489,12 +394,6 @@ impl From<WorkerOptionsBuilder> for WorkerOptions {
             .poll_interval(builder.poll_interval)
             .pg_pool(builder.pool)
             .concurrency(builder.concurrency);
-
-        // Note: GraphileWorker doesn't expose queue_name configuration in WorkerOptions
-        // Multiple queues are handled at the job enqueueing level
-        if builder.queue_name.is_some() {
-            log::warn!("Queue name configuration is not supported by GraphileWorker's WorkerOptions - ignoring");
-        }
 
         // Register all job handlers
         for handler_config in builder.job_handlers {
@@ -925,9 +824,8 @@ impl WorkerRunner {
     /// Get the number of worker instances actually running.
     ///
     /// Always returns 1: `WorkerRunner` spawns exactly one graphile_worker
-    /// `Worker`. The historical `Vec<QueueConfig>` API allowed callers to
-    /// pass multiple configs, but only the first was ever used at runtime —
-    /// this method now reports the truth instead of `queue_configs.len()`.
+    /// `Worker`. To run multiple specialized workers, spawn multiple
+    /// `WorkerRunner` instances yourself.
     pub fn worker_count(&self) -> usize {
         1
     }
@@ -941,25 +839,6 @@ impl WorkerRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    #[allow(deprecated)] // pins the deprecated constructors' storage shape
-    fn test_queue_config_builders() {
-        let default = QueueConfig::default_queue(5);
-        assert_eq!(default.name, None);
-        assert_eq!(default.concurrency, 5);
-        assert_eq!(default.priority_range, None);
-
-        let named = QueueConfig::named_queue("bulk", 10);
-        assert_eq!(named.name, Some("bulk".to_string()));
-        assert_eq!(named.concurrency, 10);
-        assert_eq!(named.priority_range, None);
-
-        let priority = QueueConfig::priority_queue("urgent", 3, 100, 1000);
-        assert_eq!(priority.name, Some("urgent".to_string()));
-        assert_eq!(priority.concurrency, 3);
-        assert_eq!(priority.priority_range, Some((100, 1000)));
-    }
 
     #[test]
     fn test_worker_config_builders() {
