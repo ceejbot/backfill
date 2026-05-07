@@ -828,33 +828,29 @@ impl WorkerRunner {
         tokio::spawn(async move { runner.run_until_cancelled(cancellation_token).await })
     }
 
-    /// Process all currently available jobs and return
+    /// Process all currently available jobs and return.
     ///
     /// This method is designed for batch processing or testing scenarios where
     /// you want to process the current job queue without running a persistent
     /// worker.
     ///
-    /// This method processes all jobs that are currently available (where
-    /// `run_at <= now()`), respecting the configured concurrency limit.
-    /// Jobs are processed in priority order (lower priority number = higher
-    /// priority), then by `run_at` timestamp.
+    /// Processes all jobs where `run_at <= now()`, respecting the configured
+    /// concurrency limit. Jobs are processed in priority order (lower number =
+    /// higher priority), then by `run_at`.
     ///
-    /// The method returns when:
-    /// - All available jobs have been processed
-    /// - No more jobs are available to process
+    /// Returns when all available jobs have been processed.
     ///
-    /// Note: This method currently returns 0 as an accurate job count would
-    /// require additional instrumentation. The jobs are still processed
-    /// correctly.
+    /// # Counting jobs
     ///
-    /// # Returns
-    ///
-    /// Returns `Ok(0)` on success (job count tracking not yet implemented).
+    /// If you need to know how many jobs ran, register a `JobComplete` /
+    /// `JobFail` plugin via `add_plugin()` before building the worker — that's
+    /// the supported path for runtime job-count instrumentation. This method
+    /// no longer pretends to count for you.
     ///
     /// # Errors
     ///
     /// Returns an error if worker initialization or job processing fails.
-    pub async fn process_available_jobs(&self) -> Result<usize, BackfillError> {
+    pub async fn process_available_jobs(&self) -> Result<(), BackfillError> {
         log::info!("Processing available jobs (one-shot mode)");
 
         // Create worker instance
@@ -868,10 +864,7 @@ impl WorkerRunner {
             .map_err(|e| BackfillError::WorkerRuntime(e.to_string()))?;
 
         log::info!("Finished processing available jobs");
-
-        // Note: Returning 0 for now as accurate counting would require additional
-        // instrumentation. Consider using metrics or hooks to track job counts.
-        Ok(0)
+        Ok(())
     }
 
     /// Get access to the underlying BackfillClient for job enqueueing and

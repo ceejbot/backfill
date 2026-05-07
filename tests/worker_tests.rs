@@ -320,12 +320,9 @@ async fn test_worker_runner_process_available_jobs() -> Result<(), BackfillError
     enqueue_fast(client, SimpleTestJob::IDENTIFIER, &job2, None).await?;
     enqueue_fast(client, SimpleTestJob::IDENTIFIER, &job3, None).await?;
 
-    // Process all available jobs
-    let processed = worker.process_available_jobs().await?;
-
-    // Note: Returns 0 because job counting isn't implemented yet
-    // But the jobs should still be processed successfully
-    assert_eq!(processed, 0);
+    // Process all available jobs. Returns () — for job counts, plug in a
+    // JobComplete hook before building the worker.
+    worker.process_available_jobs().await?;
 
     // Verify jobs were actually processed by checking the database
     // Jobs should be completed and removed from the queue
