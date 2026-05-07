@@ -57,18 +57,22 @@ impl BackfillClient {
     pub async fn release_stale_queue_locks(&self, timeout: Duration) -> Result<u64, BackfillError> {
         let timeout_secs = timeout.as_secs();
 
+        // Bind timeout via parameter rather than format-interpolating it.
+        // u64 → i64 cast is safe: i64::MAX seconds is ~292 billion years.
         let query = format!(
             r#"
             UPDATE {schema}._private_job_queues
             SET locked_at = NULL, locked_by = NULL
             WHERE locked_at IS NOT NULL
-              AND locked_at < NOW() - INTERVAL '{timeout_secs} seconds'
+              AND locked_at < NOW() - ($1::bigint * interval '1 second')
             "#,
             schema = self.schema,
-            timeout_secs = timeout_secs
         );
 
-        let result = sqlx::query(&query).execute(&self.pool).await?;
+        let result = sqlx::query(&query)
+            .bind(timeout_secs as i64)
+            .execute(&self.pool)
+            .await?;
         let released = result.rows_affected();
 
         // Always emit metrics (counter increments even for 0)
@@ -105,13 +109,15 @@ impl BackfillClient {
             UPDATE {schema}._private_jobs
             SET locked_at = NULL, locked_by = NULL
             WHERE locked_at IS NOT NULL
-              AND locked_at < NOW() - INTERVAL '{timeout_secs} seconds'
+              AND locked_at < NOW() - ($1::bigint * interval '1 second')
             "#,
             schema = self.schema,
-            timeout_secs = timeout_secs
         );
 
-        let result = sqlx::query(&query).execute(&self.pool).await?;
+        let result = sqlx::query(&query)
+            .bind(timeout_secs as i64)
+            .execute(&self.pool)
+            .await?;
         let released = result.rows_affected();
 
         // Always emit metrics (counter increments even for 0)
@@ -173,10 +179,38 @@ impl BackfillClient {
         crate::metrics::record_cleanup_failed_jobs_deleted(deleted);
 
         if deleted > 0 {
-            log::info!(
-                "Cleaned up permanently failed jobs from main queue (count: {})",
-                deleted
-            );
+            // When the DLQ is enabled, these rows have already been captured
+            // (either by an earlier `process_failed_jobs()` tick or by the
+            // synchronous pre-cleanup move in `WorkerRunner` startup) so this
+            // delete is just garbage collection — INFO is fine. When the DLQ
+            // is *not* enabled, this delete is the only mechanism removing
+            // failed jobs from the main queue and they are gone forever:
+            // surface that loudly so an operator who didn't realize that's
+            // the consequence can see it in their logs.
+            //
+            // Detection uses `to_regclass` which returns NULL if the table
+            // doesn't exist. Failure of the existence check itself doesn't
+            // matter — we default to the louder log on uncertainty.
+            let dlq_oid: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+                .bind(format!("{}.backfill_dlq", self.schema))
+                .fetch_one(&self.pool)
+                .await
+                .ok()
+                .flatten();
+
+            if dlq_oid.is_some() {
+                log::info!(
+                    "Cleaned up permanently failed jobs from main queue (count: {})",
+                    deleted
+                );
+            } else {
+                log::warn!(
+                    "Deleted permanently failed jobs from main queue WITHOUT DLQ capture \
+                     (count: {}); they cannot be recovered. Enable dlq_processor_interval \
+                     to retain failed jobs for inspection.",
+                    deleted
+                );
+            }
         }
 
         Ok(deleted)

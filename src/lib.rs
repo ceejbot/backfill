@@ -68,6 +68,26 @@
 //! ```
 
 use chrono::{DateTime, Utc};
+
+// === Re-exports from `graphile_worker` ===
+//
+// The types below are part of backfill's *public* API surface — users
+// importing `backfill::*` see them and write code against them. As a
+// consequence, every graphile_worker minor or patch release that touches
+// any of these types (renames, signature changes, removal) is a breaking
+// change for backfill, even when graphile_worker itself doesn't intend
+// it as one (graphile_worker is pre-1.0; minor bumps are allowed to be
+// breaking under semver, and patch releases occasionally are too).
+//
+// When upgrading the graphile_worker dependency:
+// 1. Re-run the integration test suite (`cargo nextest run -F axum`).
+// 2. Audit this re-export list against the new graphile_worker for any
+//    rename/removal — those need a corresponding backfill major bump and
+//    migration note for downstream users.
+// 3. Audit `_private_*` schema usage in src/client/dlq.rs,
+//    src/client/cleanup.rs, and src/admin.rs — graphile_worker reserves
+//    the right to change those tables across versions.
+//
 // Lifecycle hooks for plugins - new Plugin API with event registration
 pub use graphile_worker::{
     // Event types (for hooks.on() registration)
