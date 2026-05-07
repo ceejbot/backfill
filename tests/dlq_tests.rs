@@ -765,10 +765,7 @@ async fn test_dlq_failure_count_is_touch_count() {
         dlq_first.id, dlq_second.id,
         "same job_key should map to the same DLQ row via UPSERT"
     );
-    assert_eq!(
-        dlq_second.failure_count, 2,
-        "second DLQ touch should increment to 2"
-    );
+    assert_eq!(dlq_second.failure_count, 2, "second DLQ touch should increment to 2");
 }
 
 /// Regression test for P1-1: `list_dlq_jobs.total` must reflect the filtered
@@ -811,10 +808,7 @@ async fn test_list_dlq_jobs_total_respects_filters() {
     }
 
     // Unfiltered: total = 8.
-    let all = client
-        .list_dlq_jobs(DlqFilter::default())
-        .await
-        .expect("list all");
+    let all = client.list_dlq_jobs(DlqFilter::default()).await.expect("list all");
     assert_eq!(all.total, 8);
 
     // Filter by task_a — must report 5, not 8.
@@ -859,11 +853,12 @@ async fn test_list_dlq_jobs_total_respects_filters() {
 /// Regression test for the DLQ-vs-cleanup startup race (P0-1).
 ///
 /// Before the fix, `WorkerRunner::run_until_cancelled` called
-/// `startup_cleanup_with_timeouts` first, which DELETEs rows from `_private_jobs`
-/// where `attempts >= max_attempts`. The DLQ processor was supposed to capture
-/// those same rows, but it ran as a periodic background task that hadn't ticked
-/// yet at startup. Net effect: jobs that hit max_attempts while the worker was
-/// down (or in the gap before the next DLQ tick) were silently deleted.
+/// `startup_cleanup_with_timeouts` first, which DELETEs rows from
+/// `_private_jobs` where `attempts >= max_attempts`. The DLQ processor was
+/// supposed to capture those same rows, but it ran as a periodic background
+/// task that hadn't ticked yet at startup. Net effect: jobs that hit
+/// max_attempts while the worker was down (or in the gap before the next DLQ
+/// tick) were silently deleted.
 ///
 /// The fix runs `process_failed_jobs()` synchronously before cleanup when DLQ
 /// is enabled. This test stages a permanently-failed job, runs the actual
@@ -917,10 +912,7 @@ async fn test_worker_startup_moves_failed_jobs_to_dlq_before_cleanup() {
     .expect("stage permanent failure");
 
     // Sanity check: not in DLQ yet, still in main table.
-    let dlq_pre = client
-        .list_dlq_jobs(DlqFilter::default())
-        .await
-        .expect("list DLQ pre");
+    let dlq_pre = client.list_dlq_jobs(DlqFilter::default()).await.expect("list DLQ pre");
     assert_eq!(dlq_pre.jobs.len(), 0, "DLQ should be empty before worker startup");
 
     // Build and run a real WorkerRunner. The DLQ processor's tick interval is
@@ -947,10 +939,7 @@ async fn test_worker_startup_moves_failed_jobs_to_dlq_before_cleanup() {
     let _ = handle.await;
 
     // Verify: the job is in DLQ, not deleted.
-    let dlq_post = client
-        .list_dlq_jobs(DlqFilter::default())
-        .await
-        .expect("list DLQ post");
+    let dlq_post = client.list_dlq_jobs(DlqFilter::default()).await.expect("list DLQ post");
     assert_eq!(
         dlq_post.jobs.len(),
         1,

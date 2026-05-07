@@ -543,12 +543,9 @@ async fn test_retry_to_exhaustion_then_dlq_via_worker() -> Result<()> {
 
         // The original job row should be gone from _private_jobs (the DLQ
         // move's atomic CTE deleted it — P1-2).
-        let count: (i64,) = sqlx::query_as(&format!(
-            "SELECT COUNT(*) FROM {}._private_jobs",
-            client.schema()
-        ))
-        .fetch_one(client.pool())
-        .await?;
+        let count: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
+            .fetch_one(client.pool())
+            .await?;
         assert_eq!(count.0, 0, "_private_jobs should be empty after DLQ move");
 
         Ok(())
@@ -626,7 +623,10 @@ async fn test_non_retryable_error_short_circuits_retries() -> Result<()> {
         // can call it directly to verify the end-to-end behaviour: the job
         // ends up in the DLQ within a single retry-cycle's worth of time.
         let moved = client.process_failed_jobs().await?;
-        assert_eq!(moved, 1, "permanent-failure short-circuit should make the job DLQ-eligible");
+        assert_eq!(
+            moved, 1,
+            "permanent-failure short-circuit should make the job DLQ-eligible"
+        );
 
         let dlq = client.list_dlq_jobs(DlqFilter::default()).await?;
         assert_eq!(dlq.jobs.len(), 1);

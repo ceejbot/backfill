@@ -16,8 +16,7 @@ use std::num::ParseIntError;
 use std::time::Duration;
 
 use backfill::{
-    BackfillError, IntoTaskHandlerResult, TaskHandler, WorkerConfig, WorkerContext, WorkerError,
-    WorkerRunner,
+    BackfillError, IntoTaskHandlerResult, TaskHandler, WorkerConfig, WorkerContext, WorkerError, WorkerRunner,
 };
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};

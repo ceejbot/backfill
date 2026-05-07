@@ -14,9 +14,9 @@
 //!   [`RetryPolicy`])
 //! - **Configurable max-attempts per job** with `fast`, `aggressive`, and
 //!   `conservative` presets
-//! - **Permanent-failure short-circuit** — non-retryable `WorkerError`
-//!   variants land in the DLQ on the first failure instead of waiting for
-//!   `max_attempts` to exhaust
+//! - **Permanent-failure short-circuit** — non-retryable `WorkerError` variants
+//!   land in the DLQ on the first failure instead of waiting for `max_attempts`
+//!   to exhaust
 //! - **Dead letter queue** handling for failed jobs
 //! - **Type-safe job handlers** using Rust's type system
 //! - **Low-latency execution** via PostgreSQL LISTEN/NOTIFY
@@ -68,7 +68,6 @@
 //! ```
 
 use chrono::{DateTime, Utc};
-
 // === Re-exports from `graphile_worker` ===
 //
 // The types below are part of backfill's *public* API surface — users
@@ -81,12 +80,10 @@ use chrono::{DateTime, Utc};
 //
 // When upgrading the graphile_worker dependency:
 // 1. Re-run the integration test suite (`cargo nextest run -F axum`).
-// 2. Audit this re-export list against the new graphile_worker for any
-//    rename/removal — those need a corresponding backfill major bump and
-//    migration note for downstream users.
-// 3. Audit `_private_*` schema usage in src/client/dlq.rs,
-//    src/client/cleanup.rs, and src/admin.rs — graphile_worker reserves
-//    the right to change those tables across versions.
+// 2. Audit this re-export list against the new graphile_worker for any rename/removal — those need a corresponding
+//    backfill major bump and migration note for downstream users.
+// 3. Audit `_private_*` schema usage in src/client/dlq.rs, src/client/cleanup.rs, and src/admin.rs —
+//    graphile_worker reserves the right to change those tables across versions.
 //
 // Lifecycle hooks for plugins - new Plugin API with event registration
 pub use graphile_worker::{
@@ -307,11 +304,11 @@ impl Queue {
 /// - [`EnqueueOutcome::Enqueued`] — the job was created (or, with
 ///   `JobKeyMode::Replace`, updated). The boxed `Job` carries the job's
 ///   id/queue_id/etc.
-/// - [`EnqueueOutcome::AlreadyInProgress`] — a job with the same `job_key`
-///   was **currently locked by a worker** when we tried to add this one.
-///   This is *not* a duplicate-key collision (that's handled by
-///   `job_key_mode`); it's a race where the worker grabbed the existing
-///   job before our update could land. The new payload was discarded.
+/// - [`EnqueueOutcome::AlreadyInProgress`] — a job with the same `job_key` was
+///   **currently locked by a worker** when we tried to add this one. This is
+///   *not* a duplicate-key collision (that's handled by `job_key_mode`); it's a
+///   race where the worker grabbed the existing job before our update could
+///   land. The new payload was discarded.
 ///
 /// # ⚠️ Footgun warning
 ///
@@ -628,10 +625,10 @@ where
 
 /// Enqueue a critical job with a high retry count (12 attempts).
 ///
-/// Use for jobs that must eventually succeed if at all possible. graphile_worker
-/// retries on a fixed `exp(min(attempts, 10))` second schedule, capping at
-/// ~6h per retry — so 12 attempts gives roughly half a day of total retry
-/// coverage. See [`RetryPolicy`] for the full timing.
+/// Use for jobs that must eventually succeed if at all possible.
+/// graphile_worker retries on a fixed `exp(min(attempts, 10))` second schedule,
+/// capping at ~6h per retry — so 12 attempts gives roughly half a day of total
+/// retry coverage. See [`RetryPolicy`] for the full timing.
 pub async fn enqueue_critical<T>(
     client: &BackfillClient,
     task_identifier: &str,

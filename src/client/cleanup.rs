@@ -149,9 +149,9 @@ impl BackfillClient {
     ///
     /// Safe usage when DLQ is enabled:
     /// 1. Call `process_failed_jobs()` first (moves rows into DLQ).
-    /// 2. Then call this function (cleans up anything the DLQ processor
-    ///    chose not to move — typically jobs with `max_attempts = 0`, which
-    ///    the DLQ processor explicitly skips).
+    /// 2. Then call this function (cleans up anything the DLQ processor chose
+    ///    not to move — typically jobs with `max_attempts = 0`, which the DLQ
+    ///    processor explicitly skips).
     ///
     /// `WorkerRunner::run_until_cancelled` already enforces this ordering at
     /// startup. Direct callers (ad-hoc maintenance scripts, etc.) must enforce

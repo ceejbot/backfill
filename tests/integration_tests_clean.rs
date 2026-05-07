@@ -1240,9 +1240,7 @@ async fn test_concurrent_enqueue_under_load() -> Result<()> {
                         message: format!("stress-{task_id}-{job_id}"),
                         number: (task_id * JOBS_PER_TASK + job_id) as i32,
                     };
-                    let outcome = client
-                        .enqueue("stress_job", &payload, JobSpec::default())
-                        .await?;
+                    let outcome = client.enqueue("stress_job", &payload, JobSpec::default()).await?;
                     if outcome.is_enqueued() {
                         enqueued += 1;
                     }
@@ -1263,12 +1261,9 @@ async fn test_concurrent_enqueue_under_load() -> Result<()> {
         assert_eq!(total_enqueued, TOTAL, "every concurrent enqueue must succeed");
 
         // Verify every row landed in _private_jobs.
-        let row_count: (i64,) = sqlx::query_as(&format!(
-            "SELECT COUNT(*) FROM {}._private_jobs",
-            client.schema()
-        ))
-        .fetch_one(client.pool())
-        .await?;
+        let row_count: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
+            .fetch_one(client.pool())
+            .await?;
         assert_eq!(
             row_count.0 as usize, TOTAL,
             "all {} jobs must be persisted in _private_jobs",
