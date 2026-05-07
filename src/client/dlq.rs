@@ -375,7 +375,8 @@ impl BackfillClient {
         };
 
         // Record metrics
-        crate::metrics::record_dlq_job_requeued(&dlq_job.task_identifier, spec.queue.as_str());
+        // Use bounded metric_label() to keep label cardinality small.
+        crate::metrics::record_dlq_job_requeued(&dlq_job.task_identifier, spec.queue.metric_label());
 
         log::info!(
             "Job requeued from DLQ (dlq_id: {}, job_id: {}, task: {})",
@@ -615,7 +616,13 @@ impl BackfillClient {
         // Record metrics
         crate::metrics::record_db_operation("dlq_add", "success");
         crate::metrics::record_db_operation_duration("dlq_add", start.elapsed().as_secs_f64());
-        crate::metrics::record_dlq_job_added(&dlq_job.queue_name, &dlq_job.task_identifier, &dlq_job.failure_reason);
+        // Bounded label: "parallel" / "serial" rather than the raw queue name
+        // (which may be "" for parallel-origin jobs and unbounded for serial).
+        crate::metrics::record_dlq_job_added(
+            crate::metrics::queue_metric_label_from_name(&dlq_job.queue_name),
+            &dlq_job.task_identifier,
+            &dlq_job.failure_reason,
+        );
 
         log::info!(
             "Job moved to DLQ (dlq_id: {}, task: {}, failure_reason: {})",

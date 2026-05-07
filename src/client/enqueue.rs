@@ -101,8 +101,10 @@ impl BackfillClient {
                 crate::metrics::record_db_operation("enqueue", "success");
                 crate::metrics::record_db_operation_duration("enqueue", start.elapsed().as_secs_f64());
 
-                // Record job enqueued metric
-                crate::metrics::record_job_enqueued(spec.queue.as_str(), task_identifier, spec.priority.0);
+                // Record job enqueued metric. Use the bounded `metric_label()`
+                // (either "parallel" or "serial") to avoid exploding the label
+                // cardinality when callers use `Queue::serial_for(entity, id)`.
+                crate::metrics::record_job_enqueued(spec.queue.metric_label(), task_identifier, spec.priority.0);
 
                 log::debug!(
                     "Job enqueued (job_id: {}, task: {}, queue: {}, priority: {})",
@@ -122,8 +124,8 @@ impl BackfillClient {
                     crate::metrics::record_db_operation("enqueue", "already_in_progress");
                     crate::metrics::record_db_operation_duration("enqueue", start.elapsed().as_secs_f64());
 
-                    // Record the already_in_progress metric
-                    crate::metrics::record_job_already_in_progress(spec.queue.as_str(), task_identifier);
+                    // Record the already_in_progress metric (bounded label)
+                    crate::metrics::record_job_already_in_progress(spec.queue.metric_label(), task_identifier);
 
                     let key = job_key.clone().unwrap_or_else(|| "<unknown>".to_string());
                     log::debug!(

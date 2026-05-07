@@ -235,14 +235,31 @@ impl Queue {
         }
     }
 
-    /// Returns a string representation for logging/metrics.
+    /// Returns a string representation for logging.
     ///
     /// Returns "parallel" for parallel queues, or the queue name for serial
-    /// queues.
+    /// queues. **Do not use this for metric labels** — serial queue names can
+    /// have unbounded cardinality (e.g., `Queue::serial_for("user", id)`
+    /// produces a different name per user, which would explode Prometheus
+    /// time-series storage). Use [`Queue::metric_label`] for metrics.
     pub fn as_str(&self) -> &str {
         match self {
             Queue::Parallel => "parallel",
             Queue::Serial(name) => name,
+        }
+    }
+
+    /// Bounded label suitable for metrics: returns either `"parallel"` or
+    /// `"serial"`.
+    ///
+    /// This drops the queue name. The library uses this for all built-in
+    /// metric emission (`backfill_jobs_enqueued`, `backfill_dlq_*`, etc.) to
+    /// keep label cardinality bounded. If you need per-queue metrics for a
+    /// fixed, small set of named queues, emit them yourself via a plugin.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Queue::Parallel => "parallel",
+            Queue::Serial(_) => "serial",
         }
     }
 
@@ -678,6 +695,18 @@ mod tests {
         assert!(!Queue::Parallel.is_serial());
         assert_eq!(Queue::Parallel.name(), None);
         assert_eq!(Queue::Parallel.as_str(), "parallel");
+    }
+
+    #[test]
+    fn queue_metric_label_is_bounded() {
+        // The whole point of metric_label vs as_str: per-entity serial queues
+        // (e.g., "user:123") collapse to "serial" instead of carrying the
+        // unbounded entity id into Prometheus labels.
+        assert_eq!(Queue::Parallel.metric_label(), "parallel");
+        assert_eq!(Queue::serial("anything").metric_label(), "serial");
+        assert_eq!(Queue::serial_for("user", 12345).metric_label(), "serial");
+        assert_eq!(Queue::serial_for("user", 99999).metric_label(), "serial");
+        assert_eq!(Queue::dead_letter().metric_label(), "serial");
     }
 
     #[test]
