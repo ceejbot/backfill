@@ -5,6 +5,67 @@ All notable changes to the Backfill project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project will adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) after reaching version 1.0.0.
 
+## [2.0.0] — Deprecation cleanup
+
+Removes the API surface that was marked `#[deprecated(since = "1.2.0")]` in
+the previous release. No behavioural changes — every removed item was
+already non-functional or duplicative; the deprecation warnings in 1.2.0
+were the upgrade signal.
+
+### Removed (BREAKING)
+
+**`RetryPolicy` math methods** — graphile_worker schedules retries via a
+fixed `exp(min(attempts, 10))`-second SQL formula, so these never reached
+the worker:
+
+- `RetryPolicy::new(max, initial, max_delay, multiplier)` — multi-arg
+  constructor. Replace with `RetryPolicy { max_attempts: n,
+  ..Default::default() }` or one of the presets.
+- `RetryPolicy::with_jitter(f64)` — replace with: drop the call (had no
+  runtime effect).
+- `RetryPolicy::calculate_delay(attempt)` — replace with: drop the call.
+- `RetryPolicy::calculate_retry_time(attempt, base)` — replace with: drop.
+- `JobSpec::calculate_retry_time(attempt, failed_at)` — replace with: drop.
+
+The `RetryPolicy` struct itself is preserved with all five fields. Only
+`max_attempts` is honored; the other fields document themselves as
+not-honored. Keeping the shape leaves room for upstream graphile_worker to
+expose per-job timing config without another API break. Presets (`fast`,
+`aggressive`, `conservative`) and the JobSpec retry builders
+(`with_fast_retries` / `with_aggressive_retries` / `with_conservative_retries`)
+are unchanged — they're cheap convenience for setting `max_attempts`.
+
+**`QueueConfig` multi-queue API** — graphile_worker doesn't expose
+per-worker queue filtering, so the multi-config shape was always a lie:
+
+- `pub struct QueueConfig` — removed entirely.
+- `QueueConfig::default_queue` / `named_queue` / `priority_queue` — gone
+  with the struct.
+- `WorkerConfig::with_queues(Vec<QueueConfig>)` — replace with
+  `WorkerConfig::with_concurrency(n)`.
+- `WorkerConfig.queue_configs: Vec<QueueConfig>` field — replaced with
+  `WorkerConfig.concurrency: usize`. Set it via `with_concurrency` or
+  struct-literal init. To run multiple specialized workers, spawn multiple
+  `WorkerRunner` instances yourself.
+- `WorkerOptionsBuilder.queue_name` field and `with_queue_name` method —
+  removed (the value was never propagated anywhere it would have effect).
+- The internal "Queue name configuration is not supported" WARN log —
+  removed (now unreachable).
+
+**Migration for the `named_queue` use case**: per-job queue routing
+remains available at enqueue time via `Queue::serial(name)` and
+`Queue::serial_for(entity, id)`. That was always the right tool; the
+`QueueConfig::named_queue` constructor was a misleading second path that
+silently delivered serial-by-default behaviour to users who just wanted
+a label.
+
+### Tests
+
+- 108 (was 113 in 1.2.0). Five removed: three for the now-deleted
+  `QueueConfig` constructors, one for the "multi-queue first-config
+  wins" behaviour that no longer exists, one in-source unit test for
+  the deleted `RetryPolicy` math.
+
 ## [1.2.0] — Production-readiness audit
 
 A focused bug-fix release driven by a top-to-bottom production-readiness
