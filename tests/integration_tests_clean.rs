@@ -947,9 +947,10 @@ async fn test_worker_crash_recovery_through_startup() -> Result<()> {
         }
 
         // Pull diagnostic state if we didn't recover, then cancel.
-        let final_state: Option<(i16, i16, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> = sqlx::query_as(
-            &format!("SELECT attempts, max_attempts, locked_at, locked_by FROM {schema}._private_jobs LIMIT 1"),
-        )
+        type JobDiagRow = (i16, i16, Option<chrono::DateTime<chrono::Utc>>, Option<String>);
+        let final_state: Option<JobDiagRow> = sqlx::query_as(&format!(
+            "SELECT attempts, max_attempts, locked_at, locked_by FROM {schema}._private_jobs LIMIT 1"
+        ))
         .fetch_optional(client.pool())
         .await?;
 
