@@ -16,7 +16,7 @@ use std::num::ParseIntError;
 use std::time::Duration;
 
 use backfill::{
-    BackfillError, IntoTaskHandlerResult, QueueConfig, TaskHandler, WorkerConfig, WorkerContext, WorkerError,
+    BackfillError, IntoTaskHandlerResult, TaskHandler, WorkerConfig, WorkerContext, WorkerError,
     WorkerRunner,
 };
 use log::{error, info, warn};
@@ -107,19 +107,22 @@ impl ExampleWorkerConfig {
 
 impl From<ExampleWorkerConfig> for WorkerConfig {
     fn from(value: ExampleWorkerConfig) -> Self {
-        WorkerConfig {
-            database_url: value.database_url,
-            schema: value.schema,
-            queue_configs: vec![
-                QueueConfig::named_queue("fast", value.fast_concurrency),
-                QueueConfig::named_queue("bulk", value.bulk_concurrency),
-                QueueConfig::named_queue("dead_letter", value.dlq_concurrency),
-                QueueConfig::default_queue(5), // Default queue with moderate concurrency
-            ],
-            poll_interval: value.poll_interval,
-            dlq_processor_interval: Some(value.dlq_processor_interval),
-            ..Default::default()
-        }
+        // A single WorkerRunner spawns one Worker; pick the highest of the
+        // configured per-queue concurrencies so this worker can keep up with
+        // any of them. To run truly separate workers per queue, spawn
+        // multiple WorkerRunner instances yourself — graphile_worker doesn't
+        // expose per-worker queue filtering.
+        let concurrency = value
+            .fast_concurrency
+            .max(value.bulk_concurrency)
+            .max(value.dlq_concurrency)
+            .max(5);
+
+        WorkerConfig::new(value.database_url)
+            .with_schema(value.schema)
+            .with_concurrency(concurrency)
+            .with_poll_interval(value.poll_interval)
+            .with_dlq_processor_interval(Some(value.dlq_processor_interval))
     }
 }
 

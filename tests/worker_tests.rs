@@ -45,16 +45,14 @@ async fn test_worker_config_builder() {
         .with_schema("custom_schema")
         .with_poll_interval(Duration::from_millis(100))
         .with_dlq_processor_interval(Some(Duration::from_secs(30)))
-        .with_queues(vec![
-            QueueConfig::default_queue(5),
-            QueueConfig::named_queue("fast", 10),
-        ]);
+        .with_concurrency(10);
 
     assert_eq!(config.database_url, "postgresql://localhost/test");
     assert_eq!(config.schema, "custom_schema");
     assert_eq!(config.poll_interval, Duration::from_millis(100));
     assert_eq!(config.dlq_processor_interval, Some(Duration::from_secs(30)));
-    assert_eq!(config.queue_configs.len(), 2);
+    assert_eq!(config.queue_configs.len(), 1);
+    assert_eq!(config.queue_configs[0].concurrency, 10);
 }
 
 #[tokio::test]
@@ -74,6 +72,7 @@ async fn test_queue_config_default_queue() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // documents the deprecated constructor's storage shape
 async fn test_queue_config_named_queue() {
     let config = QueueConfig::named_queue("bulk", 20);
 
@@ -83,6 +82,7 @@ async fn test_queue_config_named_queue() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // documents the deprecated constructor's storage shape
 async fn test_queue_config_priority_queue() {
     let config = QueueConfig::priority_queue("urgent", 5, -100, 100);
 
@@ -151,7 +151,12 @@ async fn test_worker_runner_multiple_job_types() -> Result<(), BackfillError> {
 }
 
 #[tokio::test]
-async fn test_worker_runner_with_multiple_queues() -> Result<(), BackfillError> {
+#[allow(deprecated)] // covers the deprecated multi-queue API while it still exists
+async fn test_worker_runner_with_multiple_queues_only_first_honored() -> Result<(), BackfillError> {
+    // The Vec<QueueConfig> API is deprecated because graphile_worker doesn't
+    // expose per-worker queue filtering; only one Worker is ever spawned and
+    // only the first config's concurrency is used. This test pins that
+    // behaviour: passing 3 configs results in worker_count == 1.
     let config = WorkerConfig::new(get_test_database_url())
         .with_schema("test_worker_queues")
         .with_queues(vec![
@@ -167,7 +172,11 @@ async fn test_worker_runner_with_multiple_queues() -> Result<(), BackfillError> 
         .build()
         .await?;
 
-    assert_eq!(worker.worker_count(), 3);
+    assert_eq!(
+        worker.worker_count(),
+        1,
+        "WorkerRunner only ever spawns one Worker, regardless of queue_configs.len()"
+    );
 
     Ok(())
 }
@@ -358,7 +367,7 @@ async fn test_worker_runner_invalid_database_url() {
 async fn test_worker_options_builder_concurrency() -> Result<(), BackfillError> {
     let config = WorkerConfig::new(get_test_database_url())
         .with_schema("test_concurrency")
-        .with_queues(vec![QueueConfig::default_queue(15)])
+        .with_concurrency(15)
         .with_dlq_processor_interval(None);
 
     let worker = WorkerRunner::builder(config)
