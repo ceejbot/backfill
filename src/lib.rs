@@ -479,26 +479,6 @@ impl JobSpec {
     pub fn effective_retry_policy(&self) -> RetryPolicy {
         self.retry_policy.clone().unwrap_or_default()
     }
-
-    /// Calculate what the next retry time *would* be under this spec's
-    /// policy.
-    ///
-    /// **Not used at runtime.** graphile_worker schedules retries via a
-    /// fixed SQL formula. This method is preserved as a utility but has no
-    /// effect on actual job behaviour.
-    #[deprecated(
-        since = "1.2.0",
-        note = "graphile_worker computes retry timing in SQL and ignores this method. Returns a value but has no runtime effect."
-    )]
-    pub fn calculate_retry_time(&self, attempt: i32, failed_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let policy = self.effective_retry_policy();
-        if policy.should_retry(attempt) {
-            #[allow(deprecated)]
-            Some(policy.calculate_retry_time(attempt, failed_at))
-        } else {
-            None // No more retries
-        }
-    }
 }
 
 impl From<JobSpec> for GraphileJobSpec {
