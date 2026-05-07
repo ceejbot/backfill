@@ -32,7 +32,13 @@ pub struct DlqJob {
     pub max_attempts: Option<i32>,
     /// Human-readable failure reason
     pub failure_reason: String,
-    /// Number of times the job failed
+    /// How many times this logical job (by `job_key`) has reached the DLQ.
+    ///
+    /// For jobs with a `job_key`, the DLQ row is upserted: a job that fails,
+    /// gets requeued by an admin, and fails again touches the same DLQ row
+    /// twice — `failure_count` increments by 1 each time. For jobs without
+    /// a `job_key` every failure creates a fresh DLQ row, so this always
+    /// reads `1`.
     pub failure_count: i32,
     /// Last error details as JSON
     pub last_error: Option<serde_json::Value>,
@@ -554,26 +560,29 @@ impl BackfillClient {
             String::new()
         };
 
-        // Use UPSERT to handle the case where a requeued job fails again.
-        // If a DLQ entry with the same job_key already exists, update it
-        // instead of creating a duplicate. This ensures one DLQ entry per
-        // logical job and keeps failed_at current for cooldown calculations.
+        // UPSERT to handle the case where a requeued job fails again. If a
+        // DLQ entry with the same job_key already exists, update it instead
+        // of creating a duplicate — keeps `failed_at` current and counts the
+        // touch in `failure_count`.
+        //
+        // `failure_count` is a count of DLQ-touch events for this logical job
+        // (1 for first DLQ landing, +1 each subsequent requeue-then-fail).
+        // It is NOT a cumulative count of handler-failure invocations.
         let upsert_query = format!(
             r#"
-            INSERT INTO {}.backfill_dlq (
+            INSERT INTO {schema}.backfill_dlq (
                 original_job_id, task_identifier, payload, queue_name, priority,
                 job_key, max_attempts, failure_reason, failure_count, last_error,
                 original_created_at, original_run_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11)
             ON CONFLICT (job_key) WHERE job_key IS NOT NULL DO UPDATE SET
                 failed_at = NOW(),
-                failure_count = {schema}.backfill_dlq.failure_count + EXCLUDED.failure_count,
+                failure_count = {schema}.backfill_dlq.failure_count + 1,
                 failure_reason = EXCLUDED.failure_reason,
                 last_error = EXCLUDED.last_error,
                 original_job_id = EXCLUDED.original_job_id
             RETURNING *
         "#,
-            self.schema,
             schema = self.schema
         );
 
@@ -586,7 +595,6 @@ impl BackfillClient {
             .bind(original_job.key())
             .bind(original_job.max_attempts())
             .bind(failure_reason)
-            .bind(original_job.attempts())
             .bind(&last_error)
             .bind(original_job.created_at())
             .bind(original_job.run_at())
@@ -701,6 +709,9 @@ impl BackfillClient {
             // sources from `deleted`, so when DELETE finds nothing
             // (e.g., another worker already moved the row) the INSERT runs
             // zero times.
+            // failure_count semantics: count of DLQ-touch events for this job
+            // (1 on first move, +1 each subsequent requeue-fail). See
+            // DlqJob::failure_count docstring.
             let move_query = format!(
                 r#"
                 WITH deleted AS (
@@ -712,11 +723,11 @@ impl BackfillClient {
                     original_created_at, original_run_at
                 )
                 SELECT $1::bigint, $2::text, $3::jsonb, $4::text, $5::int, $6::text,
-                       $7::int, $8::text, $9::int, $10::jsonb, $11::timestamptz, $12::timestamptz
+                       $7::int, $8::text, 1, $9::jsonb, $10::timestamptz, $11::timestamptz
                 FROM deleted
                 ON CONFLICT (job_key) WHERE job_key IS NOT NULL DO UPDATE SET
                     failed_at = NOW(),
-                    failure_count = {schema}.backfill_dlq.failure_count + EXCLUDED.failure_count,
+                    failure_count = {schema}.backfill_dlq.failure_count + 1,
                     failure_reason = EXCLUDED.failure_reason,
                     last_error = EXCLUDED.last_error,
                     original_job_id = EXCLUDED.original_job_id
@@ -735,7 +746,6 @@ impl BackfillClient {
                 .bind(&job_key)
                 .bind(max_attempts as i32)
                 .bind(failure_reason)
-                .bind(attempts as i32)
                 .bind(&last_error_json)
                 .bind(created_at)
                 .bind(run_at)

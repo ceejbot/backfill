@@ -194,7 +194,9 @@ async fn test_dlq_add_job_and_retrieve() {
 
     assert_eq!(dlq_job.task_identifier, "test_job");
     assert_eq!(dlq_job.failure_reason, "Test failure reason");
-    assert_eq!(dlq_job.failure_count, *job.attempts() as i32);
+    // failure_count counts DLQ-touch events for this job_key, not handler
+    // attempts. First touch = 1 regardless of how many retries the job had.
+    assert_eq!(dlq_job.failure_count, 1);
 
     // Retrieve it
     let retrieved = client.get_dlq_job(dlq_job.id).await.expect("should retrieve");
@@ -702,6 +704,71 @@ async fn test_dlq_with_different_priorities() {
     assert!(priorities.contains(&-20)); // EMERGENCY
     assert!(priorities.contains(&-10)); // FAST_HIGH
     assert!(priorities.contains(&5)); // BULK_LOW
+}
+
+/// Regression test for P2-7: `failure_count` is a DLQ-touch counter, not a
+/// cumulative handler-attempts counter.
+///
+/// First DLQ touch for a given `job_key` should set failure_count = 1.
+/// A subsequent UPSERT (same job_key, different `_private_jobs` id —
+/// simulating a requeue-then-fail-again cycle) should increment to 2.
+#[tokio::test]
+async fn test_dlq_failure_count_is_touch_count() {
+    let client = setup_test_client("dlq_failure_count").await;
+    client.init_dlq().await.expect("DLQ init");
+
+    let job_data = TestJob {
+        message: "touch counter test".to_string(),
+        number: 7,
+    };
+
+    // First failure cycle: enqueue with a job_key, add to DLQ.
+    let outcome = client
+        .enqueue(
+            "touch_test",
+            &job_data,
+            JobSpec {
+                job_key: Some("touch_count_key".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first enqueue");
+    let first = outcome.unwrap();
+    let dlq_first = client
+        .add_to_dlq(&first, "first cycle failure", None)
+        .await
+        .expect("first add_to_dlq");
+    assert_eq!(dlq_first.failure_count, 1, "first DLQ touch should be 1");
+
+    // Simulate a requeue-then-fail-again. Re-enqueueing with the same key
+    // (job_key_mode Replace) creates a fresh _private_jobs row; adding that
+    // to DLQ should UPSERT into the existing DLQ row by job_key.
+    let outcome2 = client
+        .enqueue(
+            "touch_test",
+            &job_data,
+            JobSpec {
+                job_key: Some("touch_count_key".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("second enqueue");
+    let second = outcome2.unwrap();
+    let dlq_second = client
+        .add_to_dlq(&second, "second cycle failure", None)
+        .await
+        .expect("second add_to_dlq");
+
+    assert_eq!(
+        dlq_first.id, dlq_second.id,
+        "same job_key should map to the same DLQ row via UPSERT"
+    );
+    assert_eq!(
+        dlq_second.failure_count, 2,
+        "second DLQ touch should increment to 2"
+    );
 }
 
 /// Regression test for P1-1: `list_dlq_jobs.total` must reflect the filtered
