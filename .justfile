@@ -132,6 +132,117 @@ setup:
 	brew install fzf cargo-nextest tomato semver-bump
 	rustup install nightly
 
+# Bucketing: each commit since the previous tag is assigned to ONE section
+# based on which paths it touched. Precedence is src > examples > tests >
+# docs > build/config — a commit that touches both src and docs is
+# primarily a library change and lands under Library. Empty sections are
+# omitted.
+#
+# Workflow:
+#   just prerelease minor   # writes scaffold, opens editor
+#   <edit narrative + migration notes>
+#   git add CHANGELOG.md && git commit -m "Prepare $version"
+#   just version minor      # bumps Cargo.toml + tags
+#
+# Set NO_EDIT=1 to skip launching $EDITOR (useful for previewing).
+
+# Generate a CHANGELOG scaffold for the next release, then open $EDITOR
+prerelease BUMP:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	# Refuse if CHANGELOG has uncommitted changes — we'd clobber them
+	# during scaffold insertion.
+	if ! git diff --quiet -- CHANGELOG.md || ! git diff --cached --quiet -- CHANGELOG.md; then
+		echo "CHANGELOG.md has uncommitted changes; stash or commit first." >&2
+		exit 1
+	fi
+
+	current=$(tomato get package.version Cargo.toml)
+	next=$(semver-bump {{BUMP}} "$current")
+	prev_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+
+	if [ -z "$prev_tag" ]; then
+		range="HEAD"
+		echo "No previous tag found; including full history."
+	else
+		range="${prev_tag}..HEAD"
+	fi
+
+	# Bucket commits by primary touched-path.
+	lib_lines=""
+	example_lines=""
+	test_lines=""
+	doc_lines=""
+	build_lines=""
+
+	while IFS= read -r commit; do
+		[ -z "$commit" ] && continue
+		sha="${commit%% *}"
+		subject="${commit#* }"
+		files=$(git show --name-only --format= "$sha")
+
+		if echo "$files" | grep -q "^src/"; then
+			lib_lines+="- ${sha} ${subject}"$'\n'
+		elif echo "$files" | grep -q "^examples/"; then
+			example_lines+="- ${sha} ${subject}"$'\n'
+		elif echo "$files" | grep -q "^tests/"; then
+			test_lines+="- ${sha} ${subject}"$'\n'
+		elif echo "$files" | grep -q "^docs/"; then
+			doc_lines+="- ${sha} ${subject}"$'\n'
+		else
+			build_lines+="- ${sha} ${subject}"$'\n'
+		fi
+	done < <(git log "$range" --format="%h %s")
+
+	# Build the scaffold and prepend it above the topmost "## [" entry.
+	scaffold=$(mktemp)
+	trap 'rm -f "$scaffold"' EXIT
+
+	emit_section() {
+		local heading="$1"
+		local lines="$2"
+		if [ -n "$lines" ]; then
+			echo "### ${heading}"
+			echo
+			printf "%s" "$lines"
+			echo
+		fi
+	}
+
+	{
+		echo "## [${next}] — TODO: write title"
+		echo
+		echo "TODO: write narrative."
+		echo
+		emit_section "Library"        "$lib_lines"
+		emit_section "Documentation"  "$doc_lines"
+		emit_section "Examples"       "$example_lines"
+		emit_section "Tests"          "$test_lines"
+		emit_section "Build / config / CI" "$build_lines"
+	} > "$scaffold"
+
+	awk -v insert="$scaffold" '
+		/^## \[/ && !done {
+			while ((getline line < insert) > 0) print line
+			done = 1
+		}
+		{ print }
+	' CHANGELOG.md > CHANGELOG.md.tmp
+	mv CHANGELOG.md.tmp CHANGELOG.md
+
+	echo "CHANGELOG scaffold inserted for v${next}."
+
+	if [ -z "${NO_EDIT:-}" ]; then
+		echo "Opening editor..."
+		${EDITOR:-vi} CHANGELOG.md
+	fi
+
+	echo
+	echo "Next steps:"
+	echo "  git add CHANGELOG.md && git commit -m \"Prepare ${next}\""
+	echo "  just version {{BUMP}}"
+
 # Tag a new version for release
 version BUMP:
 	#!/usr/bin/env bash
