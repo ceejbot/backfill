@@ -221,19 +221,6 @@ pub(crate) fn update_cleanup_health_timestamp() {
     metrics::gauge!("backfill_cleanup_last_success_timestamp").set(now);
 }
 
-/// Record the age of the oldest stale lock found (for alerting)
-///
-/// This is available for future use when we want to track how old the
-/// oldest stale lock is, which helps with alerting on cleanup effectiveness.
-#[allow(dead_code)]
-pub(crate) fn record_oldest_stale_lock_age(lock_type: &str, age_seconds: f64) {
-    metrics::gauge!(
-        "backfill_cleanup_oldest_stale_lock_age_seconds",
-        "lock_type" => lock_type.to_string(),
-    )
-    .set(age_seconds);
-}
-
 /// Classify an error for metrics labels
 ///
 /// Attempts to categorize errors into standard types for metrics.
@@ -307,7 +294,5 @@ mod tests {
         record_cleanup_failed_jobs_deleted(1);
         record_cleanup_failure("queue_locks", "timeout");
         update_cleanup_health_timestamp();
-        record_oldest_stale_lock_age("queue", 120.5);
-        record_oldest_stale_lock_age("job", 300.0);
     }
 }

@@ -4,7 +4,7 @@ pub mod cleanup;
 mod dlq;
 mod enqueue;
 
-pub use dlq::*;
+pub use dlq::{DlqFilter, DlqJob, DlqJobList, DlqStats};
 
 /// High-level client for the backfill job queue system.
 #[derive(Clone)]

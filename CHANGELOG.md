@@ -5,6 +5,177 @@ All notable changes to the Backfill project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project will adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) after reaching version 1.0.0.
 
+## [3.0.0] — Public surface cleanup, doc overhaul, exemplary examples
+
+A polish-and-tighten release. No behavioural changes; all the breaks
+are simplifications of the public API surface and removals of
+example-side concerns that had leaked into library types. Most callers
+will need no migration.
+
+### Removed (BREAKING)
+
+**`RetryPolicy` reduced to one field.** The four backoff-timing fields
+(`initial_delay`, `max_delay`, `backoff_multiplier`, `jitter_factor`)
+were stored but never honored — graphile_worker uses a fixed
+`exp(min(attempts, 10))`-second SQL schedule that ignores them.
+`max_attempts` is the only field that ever reached the worker. The
+struct is now a one-field newtype around `max_attempts`. The
+`fast()` / `aggressive()` / `conservative()` presets are unchanged
+in behaviour and continue to be the recommended call sites.
+
+Migration:
+
+```rust
+// Before (2.x):
+RetryPolicy { max_attempts: 6, ..Default::default() }
+// After (3.x):
+RetryPolicy { max_attempts: 6 }
+```
+
+**`BackfillError` shrunk from 17 → 9 variants.** Removed:
+`BindError`, `FastQueueParseInt`, `BulkQueueParseInt`,
+`DeadLetterParseInt`, `PollIntervalParseInt`, `ShutdownTimeoutParseInt`,
+`DlqProcessorIntervalParseInt`. None of these had constructors in `src/`
+— they existed because `examples/basic_worker.rs` was using
+`BackfillError` for its own env-var parsing failures. The example now
+defines a local `ExampleConfigError` enum, which is the pattern users
+should copy for their own configuration code. If you were pattern-matching
+on any of these variants, define your own error type for env-var parsing
+and route library errors via `BackfillError::ParseInt(_)` (which is
+unchanged).
+
+**`WorkerOptionsBuilder` is now `pub(crate)`.** It only existed as a
+clone-able snapshot of `graphile_worker::WorkerOptions` (which is
+`!Clone`); it was never a callable extension point. Configure the
+worker via `WorkerRunnerBuilder` instead — its public surface is
+unchanged. The comprehensive cron-schedule rustdoc has moved onto
+`WorkerRunnerBuilder::add_cron_schedule`, where users will actually
+encounter it.
+
+**Wildcard re-exports replaced with explicit lists.** `src/lib.rs`
+no longer does `pub use client::*; pub use priorities::*; pub use
+retries::*; pub use worker::*;`. The exported names are now
+enumerated:
+
+- `client::{BackfillClient, DlqFilter, DlqJob, DlqJobList, DlqStats}`
+- `priorities::Priority`
+- `retries::RetryPolicy`
+- `worker::{WorkerConfig, WorkerRunner, WorkerRunnerBuilder}`
+
+`src/client/mod.rs` similarly replaces `pub use dlq::*` with an explicit
+list. Any name that was previously reachable through `backfill::*` only
+because of a wildcard, but isn't in the explicit list, is no longer
+exported. The motivation is to stop new `pub` items in those modules
+from auto-joining the public API by accident.
+
+**Direct-dependency hygiene.** Three deps moved or removed:
+
+- `graphile_worker_lifecycle_hooks` removed from `[dependencies]`. It
+  was never directly imported in `src/`; the hook types reach us
+  transitively via `graphile_worker`. If you depended on
+  `graphile_worker_lifecycle_hooks` types being available in your
+  build's dep graph just because backfill listed it, declare the dep
+  yourself.
+- `tracing` and `tracing-subscriber` moved from `[dependencies]` to
+  `[dev-dependencies]`. They're only used by examples now (admin.rs
+  switched to `log` per CLAUDE.md's logging policy). Same caveat as
+  above: declare these in your own `[dependencies]` if you were
+  relying on transitive availability.
+
+### Added
+
+- `rust-version = "1.85"` declared in `Cargo.toml`. This reflects the
+  edition-2024 floor; not a behaviour change, but tooling that respects
+  MSRV will now use it.
+- `keywords = ["queue", "jobs", "postgresql", "graphile-worker", "async"]`
+  for crates.io discoverability.
+- `JobSpec → GraphileJobSpec` conversion now `log::warn!`s when
+  `max_attempts` clamps into `i16` range. Previously silent.
+
+### Changed (non-breaking)
+
+- `categories` refined from `["concurrency", "data-structures"]` to
+  `["concurrency", "database"]` — better fit for a Postgres-backed
+  queue.
+- `src/admin.rs` switched from `tracing::{error, info, warn}` to
+  `log::{error, info, warn}`, matching the rest of the library and
+  CLAUDE.md's stated policy.
+- CI: `cargo-audit` bumped from `0.21.2` to `0.22.1` in the security
+  workflow. 0.21.2 was choking on CVSS 4.0 advisories
+  (e.g. `RUSTSEC-2026-0073`); 0.22 added CVSS 4.0 parsing.
+
+### Documentation
+
+A comprehensive sweep — every user-facing markdown doc was audited
+against the actual API and rewritten where it had drifted.
+
+- **`docs/03-metrics.md`** — full rewrite. Documents only the metrics
+  the library actually emits (with correct `"parallel"`/`"serial"`
+  bounded queue labels). The plugin example uses the real
+  `Plugin` + `HookRegistry::on(Event, handler)` API matching
+  `examples/metrics_plugin.rs` (was based on a non-existent
+  `LifecycleHooks` trait).
+- **`docs/07-plugins.md`** — full rewrite for the same reason. Now
+  covers observer events (`JobStart`, `JobComplete`, `JobFail`, …)
+  and interceptor events (`BeforeJobRun`, `AfterJobRun`,
+  `BeforeJobSchedule`) with their real `HookResult` /
+  `JobScheduleResult` return types. Documents the auto-registered
+  `DlqCleanupPlugin` and `PermanentFailurePlugin`.
+- **`docs/04-admin-api.md`** — endpoint table rebuilt from
+  `src/admin.rs`'s actual route list. Now correctly lists
+  `/dlq/batch-delete`, `/locks/status`, `/locks/cleanup`; corrects
+  `/dlq/{id}` paths; updates implementation status (most endpoints
+  are stable, two `/jobs/{id}` endpoints remain stubs). Removed a
+  stale `/Users/ceej/...` absolute path.
+- **`docs/02-dlq.md`** — fixed two `WorkerConfig` examples that used
+  the long-removed `QueueConfig::named_queue`; fixed broken cross-references.
+- **`docs/01-database-setup.md`, `docs/05-testing.md`,
+  `docs/06-dlq-migrations.md`** — `BackfillClient::new` signature
+  fixes, stale test counts removed, schema column lists matched to
+  the actual DDL.
+- **`README.md`** — Status callout sharpened (Admin API is "stable
+  except for two stubs", not "experimental"); env-var section
+  reframed as example-side; logging description corrected.
+- **`docs/implementation/incomplete-features.md`** — banner added
+  flagging the whole `implementation/` folder as historical archive.
+- Two broken intra-doc links in `src/lib.rs` fixed; `cargo doc
+  --no-deps -F axum` is now warning-free.
+
+### Examples
+
+`examples/basic_worker.rs` rewritten to demonstrate recommended patterns:
+
+- Local `ExampleConfigError` (thiserror) for env-var parse failures,
+  with a structured `InvalidInteger { var, value, source }` variant.
+- Single `parse_env<T: FromStr<Err = ParseIntError>>` helper
+  replacing six near-identical `.map_err()` closures.
+- Single honest `CONCURRENCY` env var replacing the misleading
+  `FAST_QUEUE_CONCURRENCY` / `BULK_QUEUE_CONCURRENCY` /
+  `DLQ_CONCURRENCY` trio that all collapsed into one number anyway.
+- Pinned-future graceful shutdown that actually waits for the worker
+  to drain (the previous code awaited `CancellationToken::cancelled()`
+  *after* calling `cancel()`, which returned immediately).
+- All `tracing::span!` removed; `log` is the only logging facade.
+
+`examples/enqueue_jobs.rs` updated for the slimmer `RetryPolicy`.
+
+### Internals
+
+- Dropped speculative `record_oldest_stale_lock_age` metric helper
+  (was `#[allow(dead_code)]` "for future use").
+- Dropped unused `JobHandlerConfig.identifier` field.
+- Dropped unused `WorkerOptionsBuilder::with_concurrency` (no callers
+  after the visibility change).
+- DLQ row deserialization de-duplicated: `DlqJob::from_row(&PgRow)`
+  helper replaces three copies of a 17-field manual mapping in
+  `list_dlq_jobs` / `get_dlq_job` / `add_to_dlq`. Adding a column to
+  `backfill_dlq` is now a one-edit change.
+
+### Tests
+
+Test count unchanged at 111 integration + 24 unit + 10 doctests.
+Verified green against a live PostgreSQL run before tagging.
+
 ## [2.0.0] — Deprecation cleanup
 
 Removes the API surface that was marked `#[deprecated(since = "1.2.0")]` in
@@ -185,99 +356,6 @@ Scheduled for removal in `2.0.0`.
   concurrent-enqueue stress test.
 - All P0 and P1 fixes were verified to *fail* on the prior code via
   `git stash` / re-run before being committed.
-
-## [Unreleased]
-
-### Breaking Changes
-- **Queue API redesigned for parallel-by-default execution**
-  - Removed `Queue::Fast`, `Queue::Bulk`, `Queue::DeadLetter`, `Queue::Custom` variants
-  - Added `Queue::Parallel` (now the default) and `Queue::Serial(String)`
-  - Jobs now execute **in parallel** by default across all workers
-  - Use `Queue::serial("name")` or `Queue::serial_for("entity", id)` when you need serialization
-
-  **Migration guide:**
-  ```rust
-  // Before (v1.x): Named queues caused unintended serialization
-  JobSpec { queue: Queue::Fast, .. }      // ALL "fast" jobs ran one at a time!
-  JobSpec { queue: Queue::Bulk, .. }      // ALL "bulk" jobs ran one at a time!
-  JobSpec { queue: Queue::Custom("x".into()), .. }
-
-  // After (v2.x): Parallel by default, explicit serialization
-  JobSpec { queue: Queue::Parallel, .. }  // Jobs run concurrently (default)
-  JobSpec { queue: Queue::serial("rate-limit-api"), .. }  // Explicit serialization
-  JobSpec { queue: Queue::serial_for("user", user_id), .. }  // Per-entity serialization
-  ```
-
-### Added
-- `Queue::serial(name)` - create a named serial queue
-- `Queue::serial_for(entity, id)` - create per-entity serial queues (e.g., "user:123")
-- `Queue::is_parallel()` and `Queue::is_serial()` helper methods
-- `enqueue_serial()` convenience function for explicit serial execution
-- Admin API endpoints for lock diagnostics: `GET /locks/status`, `POST /locks/cleanup`
-- Docker Compose configuration for test database
-- Comprehensive queue behavior tests (parallel vs serial execution)
-- Implemented `WorkerRunner::process_available_jobs()` for batch processing and testing scenarios
-- Comprehensive Dead Letter Queue (DLQ) system with full CRUD operations
-- DLQ processor for automatic migration of failed jobs to the DLQ table
-- Admin HTTP API with DLQ management endpoints (experimental, feature-gated behind `axum`)
-- Exponential backoff retry system with jitter to prevent thundering herds
-- Three preset retry policies: `fast()`, `aggressive()`, `conservative()`
-- Priority-based job scheduling with six priority levels
-- Comprehensive metrics using the `metrics` facade crate
-- Structured logging via the `log` crate
-- Complete documentation suite (8 major guides + examples)
-- Five working examples demonstrating key usage patterns
-- Integration test suite with isolated schema testing pattern (55 tests, 74.62% coverage)
-- Code coverage reporting in CI with badges
-- SQLx compile-time query verification
-
-### Changed
-- Switched from `tracing` to `log` crate for logging (tracing still used for instrumentation)
-- Metrics now use Prometheus-compatible naming with underscores
-
-### Fixed
-- Enforced `#![deny(clippy::unwrap_used)]` to eliminate `.unwrap()` calls
-- Fixed admin_server example compilation with feature gates
-
-### Documentation
-- Added API status table to Admin API docs documenting experimental endpoints
-- Added Known Limitations section to DLQ guide
-- Documented queue name and payload visibility limitations
-- Added comprehensive testing guide with isolated schema pattern
-- Created CLAUDE.md for AI pair programming guidance
-- Added DLQ migrations guide
-- Added metrics integration guide
-
-### Security
-- Added `cargo-audit` for vulnerability checking in CI
-- No `unsafe` code allowed (`#![deny(unsafe_code)]`)
-
-## [0.1.0] - UNRELEASED
-
-Initial development version. Not yet recommended for production use.
-
-### Core Features
-- PostgreSQL-backed async job queue using GraphileWorker
-- Job enqueueing with priorities, queues, and scheduling
-- Worker runner with graceful shutdown and background task patterns
-- Dead Letter Queue for failed job management
-- Retry policies with exponential backoff
-- Metrics and observability support
-
----
-
-## Release Checklist for 1.0.0
-
-Before releasing 1.0.0, the following items should be completed:
-
-- [ ] Finalize Admin API (complete stub endpoints or mark as experimental)
-- [ ] Resolve DLQ queue_name tracking limitation
-- [ ] Resolve DLQ payload visibility limitation (or document workaround)
-- [ ] Complete documentation restructuring (quick start → tutorials → reference)
-- [ ] Production testing in real workloads
-- [ ] Performance benchmarking and tuning
-- [ ] Security audit
-- [ ] Publish to crates.io
 
 ---
 

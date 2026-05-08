@@ -75,30 +75,26 @@ async fn test_some_feature() -> Result<()> {
 }
 ```
 
-## Test Execution Results
+## Why this beats the old shared-schema tests
 
-### Before (Original Tests)
-- ❌ Race conditions with parallel execution
-- ❌ Required `--test-threads=1` to avoid conflicts  
-- ❌ Half the tests failed with "duplicate key" errors
-
-### After (Isolated Schema Tests)
-- ✅ All 7 integration tests pass consistently
-- ✅ Perfect parallel execution 
-- ✅ No race conditions or cleanup issues
-- ✅ Fast execution (0.12s for all tests)
+The original integration tests reused a single schema across the whole
+suite. They needed `--test-threads=1` to avoid duplicate-key collisions,
+and partial cleanup left behind state that broke subsequent runs. The
+isolated-schema pattern eliminates both: every test gets its own
+`test_<uuid>` schema, dropped on exit even if the test panics. That makes
+parallel execution safe by construction.
 
 ## Running the Tests
 
 ```bash
-# New clean integration tests (recommended)
-cargo test --test integration_tests_clean
+# Run the full suite in parallel against your local PostgreSQL
+just test           # createdb backfill_test if needed, then nextest
 
-# All tests pass in parallel automatically
-cargo nextest run --test integration_tests_clean
+# Run against the bundled docker-compose database (port 5433)
+just test-docker
 
-# Old integration tests (still work but not recommended)
-cargo test --test integration_test -- --test-threads=1
+# Run a single test by name
+just test-one test_basic_job_enqueue
 ```
 
 ## Alternative Approaches Considered

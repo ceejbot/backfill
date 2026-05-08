@@ -1,5 +1,13 @@
 # Incomplete Features & TODOs
 
+> **Historical archive (snapshot dated 2025-09-30).** This document
+> reflects the state of the project at that point — including features
+> and helpers (`JobMetrics`, manual lifecycle instrumentation, …) that
+> have since been replaced. It is preserved for context, not as current
+> reference. For the live state of the library, see the [main README](../../README.md),
+> [CHANGELOG](../../CHANGELOG.md), and the user-facing docs in
+> [`docs/`](../).
+
 This document tracks partially-implemented features and known limitations in the backfill codebase.
 
 **Last Updated:** 2025-09-30

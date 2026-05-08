@@ -2,8 +2,10 @@
 name = "backfill"
 version = "2.0.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A boringly-named priority work queue system for doing async tasks."
-categories = ["concurrency", "data-structures"]
+categories = ["concurrency", "database"]
+keywords = ["queue", "jobs", "postgresql", "graphile-worker", "async"]
 authors = ["C J Silverio <ceejceej@gmail.com>"]
 readme = "README.md"
 license = "Parity-7.0.0"
@@ -12,6 +14,8 @@ homepage = "https://github.com/ceejbot/backfill"
 
 [features]
 default = []
+# Mounts the Axum admin router (`backfill::admin`). Off by default so
+# library users without an HTTP layer don't pay the axum compile cost.
 axum = ["dep:axum"]
 
 [dependencies]
@@ -31,21 +35,20 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chr
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.0", features = ["v4", "v7", "serde"] }
 
 # Optional dependencies for admin API
 axum = { version = "0.8", optional = true }
-graphile_worker_lifecycle_hooks = "0.2.2"
 
 [dev-dependencies]
-env_logger = "0.11"
 axum = "0.8"
+env_logger = "0.11"
 fastrand = "2.0"
 metrics-exporter-prometheus = "0.18.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Examples that require specific features
 [[example]]

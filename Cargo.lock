@@ -187,7 +187,6 @@ dependencies = [
  "fastrand",
  "graphile_worker",
  "graphile_worker_crontab_parser",
- "graphile_worker_lifecycle_hooks",
  "log",
  "metrics",
  "metrics-exporter-prometheus",

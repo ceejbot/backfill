@@ -1,39 +1,62 @@
-//! Basic worker example showing how to use WorkerRunner with custom job types
+//! Basic worker example: register a few job handlers and run a worker
+//! with graceful shutdown.
 //!
-//! This example demonstrates:
-//! - Defining custom job handlers
-//! - Configuring multiple queues with different concurrency
-//! - Environment-based configuration
-//! - Graceful shutdown handling for Kubernetes deployment
-//! - DLQ processing integration
+//! Demonstrates:
+//! - Implementing `TaskHandler` for several job types
+//! - Loading worker config from environment variables
+//! - The `tokio::select!` shutdown pattern, suitable for Kubernetes-style pod
+//!   restarts
+//! - DLQ processing integration (enabled by default; toggle with
+//!   `DLQ_PROCESSOR_INTERVAL_SECS=0` to disable)
 //!
-//! To run this example:
+//! Run with:
 //! ```bash
 //! DATABASE_URL=postgresql://localhost/backfill cargo run --example basic_worker
 //! ```
+//!
+//! Available env vars:
+//! - `DATABASE_URL` (required-ish; defaults to
+//!   `postgresql://localhost:5432/backfill`)
+//! - `GRAPHILE_WORKER_SCHEMA` (default: `graphile_worker`)
+//! - `CONCURRENCY` (default: 10) — max jobs the worker runs in parallel
+//! - `POLL_INTERVAL_MS` (default: 200)
+//! - `DLQ_PROCESSOR_INTERVAL_SECS` (default: 60)
+//! - `RUST_LOG` (default: `info`)
 
 use std::num::ParseIntError;
+use std::str::FromStr;
 use std::time::Duration;
 
-use backfill::{
-    BackfillError, IntoTaskHandlerResult, TaskHandler, WorkerConfig, WorkerContext, WorkerError, WorkerRunner,
-};
+use backfill::{IntoTaskHandlerResult, TaskHandler, WorkerConfig, WorkerContext, WorkerError, WorkerRunner};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, span};
 
-/// Configuration for the example worker loaded from environment variables
+// === Configuration ==========================================================
+
+/// Errors that can occur while loading this example's configuration from
+/// the environment. These are example-side concerns — the library itself
+/// has nothing to do with how *your* application reads env vars.
+#[derive(Debug, Error)]
+enum ExampleConfigError {
+    #[error("invalid {var}={value:?}: {source}")]
+    InvalidInteger {
+        var: &'static str,
+        value: String,
+        #[source]
+        source: ParseIntError,
+    },
+}
+
 #[derive(Clone, Debug)]
-pub struct ExampleWorkerConfig {
-    pub database_url: String,
-    pub schema: String,
-    pub fast_concurrency: usize,
-    pub bulk_concurrency: usize,
-    pub dlq_concurrency: usize,
-    pub poll_interval: Duration,
-    pub dlq_processor_interval: Duration,
+struct ExampleWorkerConfig {
+    database_url: String,
+    schema: String,
+    concurrency: usize,
+    poll_interval: Duration,
+    dlq_processor_interval: Duration,
 }
 
 impl Default for ExampleWorkerConfig {
@@ -41,9 +64,7 @@ impl Default for ExampleWorkerConfig {
         Self {
             database_url: "postgresql://localhost:5432/backfill".to_string(),
             schema: "graphile_worker".to_string(),
-            fast_concurrency: 10,
-            bulk_concurrency: 5,
-            dlq_concurrency: 2,
+            concurrency: 10,
             poll_interval: Duration::from_millis(200),
             dlq_processor_interval: Duration::from_secs(60),
         }
@@ -51,231 +72,181 @@ impl Default for ExampleWorkerConfig {
 }
 
 impl ExampleWorkerConfig {
-    /// Load configuration from environment variables
-    pub fn from_env() -> Result<Self, BackfillError> {
+    fn from_env() -> Result<Self, ExampleConfigError> {
         let mut config = Self::default();
 
         if let Ok(url) = std::env::var("DATABASE_URL") {
             config.database_url = url;
         }
-
         if let Ok(schema) = std::env::var("GRAPHILE_WORKER_SCHEMA") {
             config.schema = schema;
         }
-
-        if let Ok(concurrency) = std::env::var("FAST_QUEUE_CONCURRENCY") {
-            config.fast_concurrency = concurrency
-                .parse()
-                .map_err(|e: ParseIntError| BackfillError::FastQueueParseInt(e.to_string()))?;
+        if let Ok(value) = std::env::var("CONCURRENCY") {
+            config.concurrency = parse_env("CONCURRENCY", value)?;
         }
-
-        if let Ok(concurrency) = std::env::var("BULK_QUEUE_CONCURRENCY") {
-            config.bulk_concurrency = concurrency
-                .parse()
-                .map_err(|e: ParseIntError| BackfillError::BulkQueueParseInt(e.to_string()))?;
-        }
-
-        if let Ok(concurrency) = std::env::var("DLQ_CONCURRENCY") {
-            config.dlq_concurrency = concurrency
-                .parse()
-                .map_err(|e: ParseIntError| BackfillError::DeadLetterParseInt(e.to_string()))?;
-        }
-
-        if let Ok(interval) = std::env::var("POLL_INTERVAL_MS") {
-            let ms: u64 = interval
-                .parse()
-                .map_err(|e: ParseIntError| BackfillError::PollIntervalParseInt(e.to_string()))?;
+        if let Ok(value) = std::env::var("POLL_INTERVAL_MS") {
+            let ms: u64 = parse_env("POLL_INTERVAL_MS", value)?;
             config.poll_interval = Duration::from_millis(ms);
         }
-
-        if let Ok(interval) = std::env::var("DLQ_PROCESSOR_INTERVAL_SECS") {
-            let secs: u64 = interval
-                .parse()
-                .map_err(|e: ParseIntError| BackfillError::DlqProcessorIntervalParseInt(e.to_string()))?;
+        if let Ok(value) = std::env::var("DLQ_PROCESSOR_INTERVAL_SECS") {
+            let secs: u64 = parse_env("DLQ_PROCESSOR_INTERVAL_SECS", value)?;
             config.dlq_processor_interval = Duration::from_secs(secs);
         }
 
         Ok(config)
     }
+}
 
-    /// Convert to graphile's WorkerConfig for the library
-    pub fn into_worker_config(self) -> WorkerConfig {
-        self.into()
-    }
+/// Parse an env var as any integer type, attaching the variable name and
+/// raw value to the error for actionable diagnostics.
+fn parse_env<T>(var: &'static str, value: String) -> Result<T, ExampleConfigError>
+where
+    T: FromStr<Err = ParseIntError>,
+{
+    value
+        .parse()
+        .map_err(|source| ExampleConfigError::InvalidInteger { var, value, source })
 }
 
 impl From<ExampleWorkerConfig> for WorkerConfig {
     fn from(value: ExampleWorkerConfig) -> Self {
-        // A single WorkerRunner spawns one Worker; pick the highest of the
-        // configured per-queue concurrencies so this worker can keep up with
-        // any of them. To run truly separate workers per queue, spawn
-        // multiple WorkerRunner instances yourself — graphile_worker doesn't
-        // expose per-worker queue filtering.
-        let concurrency = value
-            .fast_concurrency
-            .max(value.bulk_concurrency)
-            .max(value.dlq_concurrency)
-            .max(5);
-
         WorkerConfig::new(value.database_url)
             .with_schema(value.schema)
-            .with_concurrency(concurrency)
+            .with_concurrency(value.concurrency)
             .with_poll_interval(value.poll_interval)
             .with_dlq_processor_interval(Some(value.dlq_processor_interval))
     }
 }
 
-/// Example job handler for demonstration
+// === Job handlers ===========================================================
+
+/// A toy job: optional delay, optional simulated failure. Useful for
+/// experimenting with retries and DLQ behaviour.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ExampleJob {
-    pub message: String,
-    pub delay_ms: Option<u64>,
-    pub should_fail: Option<bool>,
+struct ExampleJob {
+    message: String,
+    delay_ms: Option<u64>,
+    should_fail: Option<bool>,
 }
 
 impl TaskHandler for ExampleJob {
     const IDENTIFIER: &'static str = "example_job";
 
     async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        let span = span!(Level::INFO, "example_job",
-            message = %self.message,
-            job_id = ctx.job().id(),
-            attempt = ctx.job().attempts(),
-            max_attempts = ?ctx.job().max_attempts()
-        );
-        let _enter = span.enter();
-
         info!(
-            "Processing example job: message='{}'; job_id='{}'; attempt_num='{}';",
-            self.message,
+            "ExampleJob start (job_id={}, attempt={}/{}, message={:?})",
             ctx.job().id(),
-            ctx.job().attempts()
+            ctx.job().attempts(),
+            ctx.job().max_attempts(),
+            self.message,
         );
 
-        // Simulate work delay if specified
         if let Some(delay) = self.delay_ms {
-            info!("Simulating work delay; delay_ms='{delay}';");
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
 
-        // Simulate failure if requested (for testing)
         if self.should_fail.unwrap_or(false) {
-            warn!("Job configured to fail for testing purposes");
+            warn!("ExampleJob configured to fail; will retry per max_attempts");
+            // `JobFailed` is the generic *retryable* failure. The
+            // permanent-failure short-circuit plugin (auto-registered when
+            // DLQ is enabled) only fires on the non-retryable WorkerError
+            // variants — InvalidInput, ValidationFailed, Unauthorized, etc.
             return Err(WorkerError::JobFailed {
-                message: "Job was configured to fail".to_string(),
+                message: "simulated failure".to_string(),
             });
         }
 
-        info!(
-            "Example job completed successfully; job_id='{}'; processing_time_ms='{}';",
-            ctx.job().id(),
-            self.delay_ms.unwrap_or(0),
-        );
+        info!("ExampleJob done (job_id={})", ctx.job().id());
         Ok::<(), WorkerError>(())
     }
 }
 
-/// Send email job for notifications and user communication
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SendEmailJob {
-    pub to: String,
-    pub subject: String,
-    pub body: String,
-    pub template: Option<String>,
+struct SendEmailJob {
+    to: String,
+    subject: String,
+    body: String,
 }
 
 impl TaskHandler for SendEmailJob {
     const IDENTIFIER: &'static str = "send_email";
 
     async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        let span = span!(Level::INFO, "send_email", to = %self.to, subject = %self.subject);
-        let _enter = span.enter();
+        info!("SendEmail to={} subject={:?}", self.to, self.subject);
 
-        info!("Sending email to: {}", self.to);
-
-        // Simulate email sending (in real implementation, integrate with email service)
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Validate email address format
+        // Validate at the edge so the rest of the function can assume a
+        // well-formed address. Returning `InvalidInput` (a non-retryable
+        // WorkerError variant) tells the permanent-failure plugin to
+        // route this straight to the DLQ instead of retrying ~12 times
+        // over six hours.
         if !self.to.contains('@') {
             return Err(WorkerError::InvalidInput {
-                message: format!("Invalid email address: {}", self.to),
+                message: format!("not an email address: {:?}", self.to),
             });
         }
 
-        info!("Email sent successfully to {}", self.to);
+        // Pretend to send.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = self.body; // shut up the unused-field lint
+
         Ok::<(), WorkerError>(())
     }
 }
 
-/// Process user data for analytics and reporting
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ProcessUserDataJob {
-    pub user_id: String,
-    pub data_type: String,
-    pub batch_size: Option<usize>,
+struct ProcessUserDataJob {
+    user_id: String,
+    data_type: String,
+    batch_size: Option<usize>,
 }
 
 impl TaskHandler for ProcessUserDataJob {
     const IDENTIFIER: &'static str = "process_user_data";
 
     async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        let span = span!(Level::INFO, "process_user_data", user_id = %self.user_id, data_type = %self.data_type);
-        let _enter = span.enter();
-
-        info!("Processing {} data for user: {}", self.data_type, self.user_id);
-
-        // Simulate data processing
+        info!(
+            "ProcessUserData user_id={} data_type={} batch_size={}",
+            self.user_id,
+            self.data_type,
+            self.batch_size.unwrap_or(100),
+        );
         let batch_size = self.batch_size.unwrap_or(100);
         tokio::time::sleep(Duration::from_millis(batch_size as u64 * 10)).await;
-
-        info!("User data processing completed for {}", self.user_id);
         Ok::<(), WorkerError>(())
     }
 }
 
-/// Generate reports for business intelligence
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GenerateReportJob {
-    pub report_type: String,
-    pub date_range: String,
-    pub format: String,
+struct GenerateReportJob {
+    report_type: String,
+    date_range: String,
+    format: String,
 }
 
 impl TaskHandler for GenerateReportJob {
     const IDENTIFIER: &'static str = "generate_report";
 
     async fn run(self, _ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        let span = span!(Level::INFO, "generate_report",
-            report_type = %self.report_type,
-            date_range = %self.date_range,
-            format = %self.format
+        info!(
+            "GenerateReport type={} range={} format={}",
+            self.report_type, self.date_range, self.format,
         );
-        let _enter = span.enter();
-
-        info!("Generating {} report for {}", self.report_type, self.date_range);
-
-        // Simulate report generation
         tokio::time::sleep(Duration::from_millis(500)).await;
-
-        info!("Report generation completed: {} format", self.format);
         Ok::<(), WorkerError>(())
     }
 }
 
-/// Setup logging using the standard log crate
-fn setup_logging() -> Result<(), BackfillError> {
-    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+// === Wiring =================================================================
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&log_level))
+fn setup_logging() {
+    let level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&level))
         .format_timestamp_millis()
         .init();
-
-    info!("Logging initialized at level: {}", log_level);
-    Ok(())
 }
 
-/// Handle graceful shutdown signals (SIGTERM, SIGINT)
+/// Block until SIGINT or (on Unix) SIGTERM arrives. Kubernetes sends
+/// SIGTERM on pod stop; Ctrl-C sends SIGINT.
 async fn wait_for_shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
@@ -293,31 +264,21 @@ async fn wait_for_shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => info!("Received SIGINT"),
-        _ = terminate => info!("Received SIGTERM"),
+        _ = ctrl_c => info!("received SIGINT"),
+        _ = terminate => info!("received SIGTERM"),
     }
 }
 
-/// Main application showing tokio::select! pattern for Kubernetes deployment
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Setup logging first
-    setup_logging()?;
+    setup_logging();
 
-    info!(
-        "Starting basic worker example; name='{}'; version='{}';",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
-    );
+    info!("starting {} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"),);
 
-    // Load configuration from environment
     let config = ExampleWorkerConfig::from_env()?;
-    info!("Worker configuration: {config:#?}");
+    info!("config: {config:#?}");
 
-    // Create worker runner and register job types
-    let worker_config = config.into_worker_config();
-
-    let worker = WorkerRunner::builder(worker_config)
+    let worker = WorkerRunner::builder(WorkerConfig::from(config))
         .await?
         .define_job::<ExampleJob>()
         .define_job::<SendEmailJob>()
@@ -326,41 +287,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    info!(
-        "Worker runner created; workers='{}'; dlq_enabled='{}';",
-        worker.worker_count(),
-        worker.dlq_processor_enabled()
-    );
+    info!("worker ready (dlq_enabled={})", worker.dlq_processor_enabled());
 
-    // Create shutdown coordination
-    let shutdown_token = CancellationToken::new();
+    let shutdown = CancellationToken::new();
 
-    // Use tokio::select! pattern for Kubernetes-style deployment
-    // This ensures any service failure causes pod restart
+    // Kubernetes-style shutdown pattern: race the worker against the
+    // signal handler. Whichever resolves first ends the program.
+    //
+    // We pin the worker future so we can await it twice — once inside the
+    // select! arm, then again after a signal arrives so we can give the
+    // worker a bounded drain window. Without the second await the program
+    // would exit the moment the signal fires, killing in-flight jobs.
+    let worker_fut = worker.run_until_cancelled(shutdown.clone());
+    tokio::pin!(worker_fut);
+
     tokio::select! {
-        // Run the worker until cancellation
-        result = worker.run_until_cancelled(shutdown_token.clone()) => {
-            error!("Worker failed: {:?}", result);
-            result?; // Propagate error to cause process exit
+        result = &mut worker_fut => {
+            // Worker exited on its own. Propagate so the orchestrator
+            // restarts us.
+            match &result {
+                Ok(()) => warn!("worker exited unexpectedly without an error"),
+                Err(e) => error!("worker exited with error: {e}"),
+            }
+            result?;
         }
-
-        // Wait for shutdown signal
         _ = wait_for_shutdown_signal() => {
-            info!("Shutdown signal received, stopping worker gracefully");
-            shutdown_token.cancel();
-
-            // Give worker time to stop gracefully
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(25)) => {
-                    warn!("Graceful shutdown timeout reached");
-                }
-                _ = shutdown_token.cancelled() => {
-                    info!("Worker stopped gracefully");
-                }
+            info!("shutdown requested; cancelling worker");
+            shutdown.cancel();
+            // Give the worker a bounded window to drain. Anything still
+            // running after this gets killed when the process exits —
+            // your jobs should be idempotent.
+            match tokio::time::timeout(Duration::from_secs(25), &mut worker_fut).await {
+                Ok(Ok(())) => info!("worker drained cleanly"),
+                Ok(Err(e)) => error!("worker error during drain: {e}"),
+                Err(_) => warn!("graceful-shutdown deadline reached; forcing exit"),
             }
         }
     }
 
-    info!("Basic worker example stopped");
+    info!("stopped");
     Ok(())
 }

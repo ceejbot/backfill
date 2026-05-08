@@ -149,13 +149,13 @@ pub mod metrics;
 pub use client::cleanup::{
     DEFAULT_STALE_JOB_LOCK_TIMEOUT, DEFAULT_STALE_LOCK_CLEANUP_INTERVAL, DEFAULT_STALE_QUEUE_LOCK_TIMEOUT,
 };
-pub use client::*;
+pub use client::{BackfillClient, DlqFilter, DlqJob, DlqJobList, DlqStats};
 pub use dlq_cleanup_plugin::DlqCleanupPlugin;
 pub use errors::{BackfillError, WorkerError};
 pub use permanent_failure_plugin::PermanentFailurePlugin;
-pub use priorities::*;
-pub use retries::*;
-pub use worker::*;
+pub use priorities::Priority;
+pub use retries::RetryPolicy;
+pub use worker::{WorkerConfig, WorkerRunner, WorkerRunnerBuilder};
 
 /// Queue configuration for job execution.
 ///
@@ -443,8 +443,8 @@ impl JobSpec {
 
     /// Configure for the `fast` preset: `max_attempts = 3`.
     ///
-    /// In practice this differs from [`with_aggressive_retries`] and
-    /// [`with_conservative_retries`] only in the attempt count — see
+    /// Differs from [`Self::with_aggressive_retries`] and
+    /// [`Self::with_conservative_retries`] only in the attempt count — see
     /// [`RetryPolicy`].
     pub fn with_fast_retries(mut self) -> Self {
         let policy = RetryPolicy::fast();
@@ -497,8 +497,18 @@ impl From<JobSpec> for GraphileJobSpec {
         }
 
         if let Some(max_attempts) = spec.max_attempts {
-            // Convert i32 to i16, clamping to avoid overflow
+            // graphile_worker stores max_attempts as `smallint`. Clamp into
+            // i16 range. Negative values become 0 (no retries); values above
+            // 32767 cap at 32767. Either case is almost certainly a caller
+            // bug, so log when it happens.
             let max_attempts_i16 = max_attempts.clamp(0, i16::MAX as i32) as i16;
+            if i32::from(max_attempts_i16) != max_attempts {
+                log::warn!(
+                    "JobSpec.max_attempts ({}) outside i16 range; clamped to {}",
+                    max_attempts,
+                    max_attempts_i16
+                );
+            }
             builder = builder.max_attempts(max_attempts_i16);
         }
 

@@ -25,13 +25,16 @@ jobs:
                   toolchain: stable
                   profile: minimal
 
+            # 0.22+ is required: 0.21.2 chokes on CVSS 4.0 advisories
+            # (e.g. RUSTSEC-2026-0073) that have started landing in the
+            # rustsec/advisory-db. cargo-audit 0.22 added CVSS 4.0 parsing.
             - name: get cargo-audit the fast way
               shell: bash
               run: |
                   if [[ -z $(which cargo-audit) ]]; then
-                    curl -sLo cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.21.2/cargo-audit-x86_64-unknown-linux-gnu-v0.21.2.tgz
+                    curl -sLo cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.1/cargo-audit-x86_64-unknown-linux-gnu-v0.22.1.tgz
                     tar xfz cargo-audit.tgz
-                    mv cargo-audit-x86_64-unknown-linux-gnu-v0.21.2/cargo-audit ~/.cargo/bin/cargo-audit
+                    mv cargo-audit-x86_64-unknown-linux-gnu-v0.22.1/cargo-audit ~/.cargo/bin/cargo-audit
                   fi
 
             - name: run cargo audit

@@ -5,25 +5,12 @@ use thiserror::Error;
 /// Core errors for the Backfill library
 #[derive(Debug, Error)]
 pub enum BackfillError {
-    // Configuration errors
-    #[error("Invalid FAST_QUEUE_CONCURRENCY: {0}")]
-    FastQueueParseInt(String),
-    #[error("Invalid BULK_QUEUE_CONCURRENCY: {0}")]
-    BulkQueueParseInt(String),
-    #[error("Invalid DEAD_LETTER_QUEUE_CONCURRENCY: {0}")]
-    DeadLetterParseInt(String),
-    #[error("Invalid POLL_INTERVAL_MS: {0}")]
-    PollIntervalParseInt(String),
-    #[error("Invalid SHUTDOWN_TIMEOUT_SECS: {0}")]
-    ShutdownTimeoutParseInt(String),
-    #[error("Invalid DLQ_PROCESSOR_INTERVAL_SECS: {0}")]
-    DlqProcessorIntervalParseInt(String),
-    #[error("Failed to bind to port 3000: {0}")]
-    BindError(String),
+    /// A non-fatal runtime condition the library wants to surface as an
+    /// error string (e.g., DLQ requeue blocked by an in-progress job).
     #[error("Runtime error: {0}")]
     RuntimeError(String),
 
-    // DLQ errors
+    /// DLQ row not found for the given id.
     #[error("DLQ job not found with ID: {0}")]
     DlqJobNotFound(i64),
 
@@ -32,6 +19,7 @@ pub enum BackfillError {
     GraphileWorker(#[from] graphile_worker::errors::GraphileWorkerError),
     #[error(transparent)]
     GraphileBuild(#[from] graphile_worker::builder::WorkerBuildError),
+    /// graphile_worker's `Worker::run` returned an error string.
     #[error("Worker runtime error: {0}")]
     WorkerRuntime(String),
     #[error(transparent)]

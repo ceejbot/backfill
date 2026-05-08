@@ -218,7 +218,7 @@ let client = BackfillClient::new_with_schema(&url, \"app1_jobs\").await?;
 let client = BackfillClient::new_with_schema(&url, \"app2_jobs\").await?;
 ```
 
-## SQLx usage
+## SQLx usage in *your* application
 
 > **Note on backfill itself**: backfill uses runtime SQLx queries
 > (`sqlx::query()` and friends) rather than the compile-time
@@ -234,7 +234,8 @@ let client = BackfillClient::new_with_schema(&url, \"app2_jobs\").await?;
 > any `sqlx::query!()` / `sqlx::query_as!()` macros yourself, you can
 > skip this section.
 
-This library uses SQLx for all database operations, which provides excellent compile-time verification of SQL queries. This is one of Rust's greatest strengths for database applications.
+If you do write your own `sqlx::query!()` / `query_as!()` macros against
+backfill's tables, the compile-time verification is well worth setting up.
 
 ### Overview
 
@@ -377,6 +378,5 @@ The safety benefits far outweigh the small compilation cost!
 - ✅ **Production ready** - Built-in migration management
 - ✅ **Flexible deployment** - Works in any environment setup
 - ✅ **Non-intrusive** - Uses separate schema from your app tables
-- ✅ **Type-safe queries** - SQLx compile-time verification for safety
 
 The `backfill` library makes job queues as easy as connecting to a database!

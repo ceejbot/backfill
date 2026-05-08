@@ -10,7 +10,7 @@ Enable the `axum` feature in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-backfill = { version = "0.1", features = ["axum"] }
+backfill = { version = "2", features = ["axum"] }
 ```
 
 ## Basic Integration
@@ -62,32 +62,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
   ```
 
-- **GET `/status`** - System status overview
+- **GET `/status`** - System status overview. The `queues` array is
+  populated by querying `_private_job_queues` (one entry per known
+  serial queue name) plus a synthetic `"default"` entry if any
+  parallel-queue jobs exist. `completed_jobs` is always reported as 0
+  — graphile_worker deletes completed rows from `_private_jobs`, so
+  that number is only available via the metrics system, not the DB.
   ```json
   {
     "queues": [
       {
-        "queue_name": "fast",
+        "queue_name": "default",
         "pending_jobs": 5,
         "active_jobs": 2,
-        "completed_jobs": 100,
+        "completed_jobs": 0,
         "failed_jobs": 3
       }
     ],
     "dlq_enabled": true,
     "dlq_job_count": 3,
-    "total_jobs": 110
+    "total_jobs": 10
   }
   ```
 
 ### Job Management
 
-- **POST `/jobs`** - Enqueue a new job
+- **POST `/jobs`** - Enqueue a new job. The `queue` field accepts:
+  `"parallel"` or `""` for parallel execution (the default — jobs run
+  concurrently across workers), or any other string for a serial queue
+  with that name (one job at a time, cluster-wide).
   ```json
   {
     "task_identifier": "send_email",
     "payload": {"to": "user@example.com", "subject": "Welcome!"},
-    "queue": "fast",
+    "queue": "parallel",
     "priority": -10,
     "max_attempts": 5,
     "job_key": "email_12345",
@@ -95,8 +103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
   ```
 
-- **GET `/jobs/:job_id`** - Get job details *(coming soon)*
-- **DELETE `/jobs/:job_id/cancel`** - Cancel a pending job *(coming soon)*
+- **GET `/jobs/:job_id`** - *Not implemented* — returns 501.
+- **DELETE `/jobs/:job_id`** - *Not implemented* — returns 501.
 
 ### Queue Management
 
@@ -107,19 +115,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - **GET `/dlq`** - List DLQ jobs with pagination
   - Query parameters: `limit`, `offset`, `queue_name`, `task_identifier`
+  - `queue_name` matches stored values: empty string for parallel-origin
+    jobs, the queue name for serial-origin jobs.
   ```json
   {
     "jobs": [
       {
         "id": 123,
-        "original_job_id": "550e8400-e29b-41d4-a716-446655440000",
+        "original_job_id": 9876,
         "task_identifier": "send_email",
         "payload": {"to": "invalid@email"},
-        "queue_name": "fast",
+        "queue_name": "",
         "priority": -10,
-        "failure_count": 5,
+        "failure_count": 1,
         "failed_at": "2024-01-01T10:00:00Z",
-        "last_error": {"error": "Invalid email address"}
+        "last_error": "Invalid email address"
       }
     ],
     "total_count": 50,
@@ -133,8 +143,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     "total_jobs": 50,
     "unique_tasks": 8,
     "unique_queues": 3,
-    "oldest_failed_at": "2024-01-01T09:00:00Z",
-    "newest_failed_at": "2024-01-01T11:00:00Z"
+    "avg_failure_count": 1.4,
+    "total_requeued": 12,
+    "oldest_failure": "2024-01-01T09:00:00Z",
+    "newest_failure": "2024-01-01T11:00:00Z",
+    "task_breakdown": [["send_email", 30], ["process_order", 12]]
   }
   ```
 
@@ -143,13 +156,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **POST `/dlq/:dlq_id/requeue`** - Move a DLQ job back to the main queue
   ```json
   {
-    "job_id": "550e8400-e29b-41d4-a716-446655440001",
+    "job_id": 12345,
     "status": "requeued",
     "requeued_at": "2024-01-01T12:00:00Z"
   }
   ```
 
-- **POST `/dlq/cleanup`** - Bulk cleanup old DLQ jobs *(coming soon)*
+- **POST `/dlq/cleanup`** - Bulk-delete DLQ jobs older than a cutoff
+  (default 90 days). Body: `{ "older_than_days": 30, "task_identifier":
+  "send_email", "max_jobs": 1000, "dry_run": true }` (all fields
+  optional).
+- **POST `/dlq/batch-requeue`** - Requeue many DLQ jobs in one request,
+  with throttling and dry-run support.
+- **POST `/dlq/batch-delete`** - Bulk-delete DLQ jobs by filter (separate
+  from `/dlq/cleanup`, which is age-based).
+
+### Lock Diagnostics
+
+- **GET `/locks/status`** - Current queue and job locks, with a
+  `health_status` summary (healthy / warning / unhealthy) and stale-lock
+  counts. Useful for diagnosing crashed workers.
+- **POST `/locks/cleanup`** - Manually release stale locks and optionally
+  delete permanently-failed jobs. Supports `dry_run` and override
+  thresholds.
 
 ## Error Handling
 
@@ -262,42 +291,31 @@ curl "http://localhost:3000/admin/backfill/dlq?limit=10"
 
 ## API Status
 
-The following table shows the current implementation status of each endpoint:
+The following table reflects the current state of every route registered
+in `src/admin.rs`:
 
 | Endpoint | Method | Status | Notes |
 |----------|--------|--------|-------|
-| `/health` | GET | ✅ **Stable** | Fully implemented, production-ready |
-| `/jobs` | POST | ✅ **Stable** | Fully implemented, production-ready |
-| `/jobs/:job_id` | GET | ⚠️ **Stub** | Returns 501 NOT_IMPLEMENTED |
-| `/jobs/:job_id` | DELETE | ⚠️ **Stub** | Returns 501 NOT_IMPLEMENTED |
-| `/status` | GET | ⚠️ **Partial** | Returns hardcoded zero values |
-| `/queues` | GET | ⚠️ **Partial** | Returns hardcoded "fast" and "bulk" queues |
-| `/queues/:queue_name/stats` | GET | ⚠️ **Partial** | Returns hardcoded zero values |
-| `/dlq` | GET | ✅ **Stable** | Fully implemented with filtering and pagination |
-| `/dlq/stats` | GET | ✅ **Stable** | Fully implemented with task-level breakdowns |
-| `/dlq/jobs/:job_id` | GET | ✅ **Stable** | Fully implemented |
-| `/dlq/jobs/:job_id/requeue` | POST | ✅ **Stable** | Fully implemented |
-| `/dlq/jobs/:job_id` | DELETE | ✅ **Stable** | Fully implemented |
-| `/dlq/requeue` | POST | ✅ **Stable** | Fully implemented with criteria filtering |
-| `/dlq/cleanup` | POST | ⚠️ **Stub** | Returns 501 NOT_IMPLEMENTED |
+| `/health` | GET | ✅ Stable | Static response with crate version |
+| `/status` | GET | ✅ Stable | Live queue + DLQ stats from the DB. `completed_jobs` is always `0` (graphile_worker deletes completed rows) |
+| `/jobs` | POST | ✅ Stable | Full enqueue with priority, max_attempts, job_key, run_at |
+| `/jobs/{job_id}` | GET | ⚠️ Not implemented | Returns 501 |
+| `/jobs/{job_id}/cancel` | DELETE | ⚠️ Not implemented | Returns 501 |
+| `/queues` | GET | ✅ Stable | Live list of queue names with per-queue counts |
+| `/queues/{queue_name}/stats` | GET | ✅ Stable | Live counts for a single queue |
+| `/dlq` | GET | ✅ Stable | Filtering + pagination |
+| `/dlq/stats` | GET | ✅ Stable | Aggregate counters and per-task breakdown |
+| `/dlq/{dlq_id}` | GET | ✅ Stable | |
+| `/dlq/{dlq_id}` | DELETE | ✅ Stable | |
+| `/dlq/{dlq_id}/requeue` | POST | ✅ Stable | |
+| `/dlq/cleanup` | POST | ✅ Stable | Age-based bulk delete with `dry_run` |
+| `/dlq/batch-requeue` | POST | ✅ Stable | Filter-based bulk requeue with throttling |
+| `/dlq/batch-delete` | POST | ✅ Stable | Filter-based bulk delete |
+| `/locks/status` | GET | ✅ Stable | Queue + job locks with stale-lock health summary |
+| `/locks/cleanup` | POST | ✅ Stable | Manual stale-lock cleanup with `dry_run` |
 
-### Stable Features
-
-All **DLQ management endpoints** are fully implemented and production-ready:
-- Querying DLQ with filters
-- Getting DLQ statistics
-- Requeuing jobs (individually or in batches)
-- Deleting jobs from DLQ
-
-The **health check** and **job enqueueing** endpoints are also stable.
-
-### Planned Improvements
-
-The following endpoints are planned for future releases:
-- **Job introspection** - Querying individual jobs by ID
-- **Job cancellation** - Canceling running or pending jobs
-- **Dynamic queue discovery** - Real-time queue listing from database
-- **Live queue statistics** - Real-time metrics for each queue
-- **DLQ batch cleanup** - Automated cleanup with criteria
-
-If you need these features, consider contributing! See the implementation patterns in `/Users/ceej/code/personal/rust/backfill/src/admin.rs`.
+The two unimplemented endpoints (`GET /jobs/{id}` and `DELETE
+/jobs/{id}/cancel`) sit on graphile_worker semantics that aren't cleanly
+expressible against the public API; they remain stubs until upstream
+exposes the necessary primitives. See `src/admin.rs` for implementation
+details if you'd like to contribute.

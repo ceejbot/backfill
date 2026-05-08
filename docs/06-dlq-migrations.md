@@ -15,7 +15,14 @@ The backfill library can automatically initialize the DLQ schema when needed:
 ```rust
 use backfill::BackfillClient;
 
-let client = BackfillClient::new("postgresql://localhost/mydb", "my_schema").await?;
+// Default schema ("graphile_worker"):
+let client = BackfillClient::new("postgresql://localhost/mydb").await?;
+
+// Or, with a custom schema:
+let client = BackfillClient::new_with_schema(
+    "postgresql://localhost/mydb",
+    "my_schema",
+).await?;
 
 // This will create the DLQ table if it doesn't exist
 client.init_dlq().await?;
@@ -87,25 +94,31 @@ CREATE INDEX idx_backfill_dlq_tenant
 
 ## Schema Overview
 
-The DLQ table provides comprehensive job failure tracking:
+The DLQ table provides comprehensive job failure tracking. For the full
+DDL, see [`docs/dlq_schema.sql`](dlq_schema.sql) or the `init_dlq()`
+implementation in `src/client/dlq.rs`.
 
-### Core Fields
-- **`job_id`** - Original job identifier
-- **`task_identifier`** - Job type/handler name  
-- **`queue_name`** - Processing queue
-- **`payload`** - Original job data (JSON)
+### Core fields
+- **`id`** — DLQ entry primary key (BIGSERIAL)
+- **`original_job_id`** — id of the source row in `_private_jobs`
+- **`task_identifier`** — task name (e.g. `"send_email"`)
+- **`payload`** — original job payload (JSONB)
+- **`queue_name`** — `""` for parallel-origin jobs, the queue name for
+  serial-origin jobs (preserved across requeue)
+- **`priority`**, **`job_key`**, **`max_attempts`** — original job spec
 
-### Failure Analysis
-- **`failure_count`** - Total failures before DLQ
-- **`last_error`** - Most recent error message
-- **`failed_at`** - When moved to DLQ
-- **`max_attempts`** - Retry limit when job failed
+### Failure analysis
+- **`failure_reason`** — human-readable summary
+- **`failure_count`** — DLQ-touch counter (1 on first landing, +1 each
+  subsequent requeue-then-fail, via UPSERT on `job_key`)
+- **`last_error`** — most recent error (JSONB)
+- **`failed_at`** — when the row landed in the DLQ
+- **`original_created_at`** / **`original_run_at`** — original timestamps
 
-### Administrative Features
-- **`requeued_count`** - Times requeued from DLQ
-- **`last_requeued_at`** - Most recent requeue
-- **`created_by`** - System that moved job to DLQ
-- **`notes`** - Admin notes for manual intervention
+### Administrative features
+- **`requeued_count`** — times the row has been requeued from the DLQ
+- **`last_requeued_at`** — most recent requeue
+- **`notes`** — free-form admin notes
 
 ### Performance Indexes
 

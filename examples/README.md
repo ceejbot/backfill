@@ -7,8 +7,8 @@ This directory contains examples of how to use the Backfill worker system.
 - **`basic_worker.rs`** - Complete worker setup with job handlers and graceful shutdown
 - **`enqueue_jobs.rs`** - How to enqueue jobs with different priorities and configurations
 - **`admin_server.rs`** - Axum HTTP API for job management and monitoring (requires `axum` feature)
-- **`axum_integration.rs`** - Full-stack integration example with Axum
 - **`dlq_management.rs`** - Dead Letter Queue management workflows (monitoring, requeue, cleanup)
+- **`metrics_plugin.rs`** - Prometheus metrics via a lifecycle hook plugin
 
 ## Quick Start
 
@@ -52,24 +52,31 @@ cargo run --example dlq_management
 - Batch requeue jobs after deploying fixes
 - Clean up old DLQ entries
 
-For comprehensive DLQ documentation, see [`docs/DLQ.md`](../docs/DLQ.md).
+For comprehensive DLQ documentation, see [`docs/02-dlq.md`](../docs/02-dlq.md).
 
 ## Features
 
 - **Priority queues**: EMERGENCY, FAST_HIGH, FAST_DEFAULT, BULK_DEFAULT, BULK_LOW, BULK_LOWEST
-- **Named queues**: Fast, Bulk, DeadLetter, Custom(name)
+- **Queue types**: `Queue::Parallel` (default — concurrent execution) or
+  `Queue::Serial(name)` for ordering / rate limiting
 - **Scheduling**: Immediate or delayed execution with `run_at`
 - **Idempotency**: Use `job_key` for deduplication
-- **Exponential backoff**: Built-in retry policies with jitter to prevent thundering herds
+- **Retries**: Configurable `max_attempts` per job; graphile_worker handles
+  backoff timing on a fixed `exp(min(attempts, 10))` second schedule
 - **Dead letter queue**: Automatic handling of permanently failed jobs
 - **Error handling**: Automatic retry classification
 - **Monitoring**: Comprehensive logging and tracing
 
 ## Retry Policies
 
-The example demonstrates three built-in retry policies plus custom configuration:
+The example demonstrates three built-in retry presets:
 
-- **Fast retries**: 3 attempts, 100ms-30s delays, for high-priority jobs
-- **Aggressive retries**: 12 attempts, 500ms-600s delays, for critical jobs  
-- **Conservative retries**: 5 attempts, 5s-1800s delays, for bulk processing
-- **Custom policies**: Configure attempts, delays, backoff multiplier, and jitter
+- **Fast** (`RetryPolicy::fast`): 3 attempts, for jobs where rapid
+  failure-to-DLQ is preferred over many retries
+- **Aggressive** (`RetryPolicy::aggressive`): 12 attempts, for critical jobs
+  that must eventually succeed if at all possible
+- **Conservative** (`RetryPolicy::conservative`): 5 attempts, for bulk
+  processing where consistency matters more than latency
+
+Backoff timing between retries is fixed by graphile_worker (~1s, ~3s, ~7s,
+~20s, ~55s, ~2.5min, … capped at ~6h per retry).

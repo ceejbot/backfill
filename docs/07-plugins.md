@@ -1,456 +1,353 @@
 # Lifecycle Hook Plugins
 
-Backfill exposes GraphileWorker's lifecycle hooks system, allowing you to receive callbacks for worker and job lifecycle events. This enables powerful observability, validation, and control patterns without modifying job handlers.
+Backfill exposes graphile_worker's lifecycle hook system, so you can run
+your own code at well-defined points in a worker's life: when it starts,
+when a job is fetched, when a job completes or fails, when the worker
+shuts down. This is the supported extension point for cross-cutting
+concerns — metrics, logging, validation, payload enrichment, error
+tracking — that you don't want to wedge into individual job handlers.
 
-## Table of Contents
+The library uses this same mechanism internally: when DLQ is enabled,
+`DlqCleanupPlugin` and `PermanentFailurePlugin` are auto-registered.
 
-- [Quick Start](#quick-start)
-- [Available Hooks](#available-hooks)
-- [Hook Context Types](#hook-context-types)
-- [Common Patterns](#common-patterns)
-  - [Metrics Plugin](#metrics-plugin)
-  - [Logging Plugin](#logging-plugin)
-  - [Job Validation](#job-validation)
-  - [Error Tracking](#error-tracking)
-- [Advanced Features](#advanced-features)
-- [Multiple Plugins](#multiple-plugins)
+## Quick start
 
-## Quick Start
-
-1. **Implement the `LifecycleHooks` trait:**
+A plugin is any `Clone`-able struct that implements `Plugin`. The
+`register` method receives a `HookRegistry`; you call `hooks.on(Event,
+handler)` for each event you care about.
 
 ```rust
-use backfill::{LifecycleHooks, JobCompleteContext};
+use backfill::{HookRegistry, JobComplete, JobCompleteContext, Plugin};
 
 #[derive(Clone)]
 struct MyPlugin;
 
-impl LifecycleHooks for MyPlugin {
-    async fn on_job_complete(&self, ctx: JobCompleteContext) {
-        println!("Job {} completed in {:?}",
-            ctx.job.task_identifier,
-            ctx.duration
-        );
+impl Plugin for MyPlugin {
+    fn register(self, hooks: &mut HookRegistry) {
+        hooks.on(JobComplete, |ctx: JobCompleteContext| async move {
+            println!(
+                "Job {} completed in {:?}",
+                ctx.job.task_identifier(),
+                ctx.duration,
+            );
+        });
     }
 }
 ```
 
-2. **Add the plugin to your worker:**
+Add it to a worker via the builder:
 
 ```rust
-let worker = WorkerRunner::builder(config).await?
-    .define_job::<MyJob>()
+# use backfill::{WorkerRunner, WorkerConfig};
+# #[derive(Clone)] struct MyPlugin;
+# impl backfill::Plugin for MyPlugin { fn register(self, _: &mut backfill::HookRegistry) {} }
+# async fn build(config: WorkerConfig) -> Result<(), backfill::BackfillError> {
+let _worker = WorkerRunner::builder(config).await?
+    // .define_job::<MyJob>()
     .add_plugin(MyPlugin)
     .build().await?;
+# Ok(())
+# }
 ```
 
-That's it! Your plugin will now receive callbacks for all job completions.
+`add_plugin` requires `Clone` because the worker may be rebuilt during
+its lifetime. If your plugin holds shared state, wrap it in `Arc` —
+cloning the plugin clones the handle, not the state.
 
-## Available Hooks
+## Available events
 
-The `LifecycleHooks` trait provides 13 hooks (all optional - only implement what you need):
+The events listed below are re-exported from
+`graphile_worker_lifecycle_hooks` through the `backfill` crate root. Use
+the event type as the first argument to `hooks.on(...)`.
 
-### Observer Hooks (Fire-and-forget)
+### Observer events
 
-These hooks observe events without affecting execution:
+These run *alongside* the worker — the value your async block returns
+is `()` (or, if you don't return anything, the unit type by default).
+They cannot affect job execution.
 
-| Hook | When It Fires | Context |
-|------|--------------|---------|
-| `on_worker_init` | Worker initializes | `WorkerInitContext` |
-| `on_worker_start` | Worker starts processing | `WorkerStartContext` |
-| `on_worker_shutdown` | Worker shuts down | `WorkerShutdownContext` |
-| `on_job_fetch` | Job fetched from queue | `JobFetchContext` |
-| `on_job_start` | Job execution begins | `JobStartContext` |
-| `on_job_complete` | Job completes successfully | `JobCompleteContext` |
-| `on_job_fail` | Job fails | `JobFailContext` |
-| `on_job_permanently_fail` | Job exhausts all retries | `JobPermanentlyFailContext` |
-| `on_cron_tick` | Cron scheduler ticks | `CronTickContext` |
-| `on_cron_job_scheduled` | Cron job scheduled | `CronJobScheduledContext` |
+| Event | Context type | Fires when |
+|---|---|---|
+| `WorkerInit` | `WorkerInitContext` | Worker is initializing (one-time) |
+| `WorkerStart` | `WorkerStartContext` | Worker has started processing |
+| `WorkerShutdown` | `WorkerShutdownContext` | Worker is shutting down (with `reason`) |
+| `JobFetch` | `JobFetchContext` | Job has been fetched from the queue |
+| `JobStart` | `JobStartContext` | Job execution begins |
+| `JobComplete` | `JobCompleteContext` | Job completed successfully (with `duration`) |
+| `JobFail` | `JobFailContext` | Job failed (with `error` and `will_retry`) |
+| `JobPermanentlyFail` | `JobPermanentlyFailContext` | Job exhausted retries or hit a non-retryable error |
+| `CronTick` | `CronTickContext` | Cron scheduler tick |
+| `CronJobScheduled` | `CronJobScheduledContext` | Cron job was scheduled into the queue |
 
-### Interceptor Hooks (Can modify execution)
+### Interceptor events
 
-These hooks can intercept and modify job execution:
+These run *in line with* the worker and can influence what happens
+next. Your handler returns a result type that the worker acts on.
 
-| Hook | When It Fires | Return Type | Can Do |
-|------|--------------|-------------|--------|
-| `before_job_run` | Before job handler executes | `HookResult` | Skip, fail, retry, or continue |
-| `after_job_run` | After job handler executes | `HookResult` | Override result (skip, fail, retry) |
-| `before_job_schedule` | Before job inserted to DB | `JobScheduleResult` | Modify payload, skip, or fail |
+| Event | Context type | Return type | Effect |
+|---|---|---|---|
+| `BeforeJobRun` | `BeforeJobRunContext` | `HookResult` | Skip / fail / retry / continue, before the handler runs |
+| `AfterJobRun` | `AfterJobRunContext` | `HookResult` | Override the result *after* the handler returns |
+| `BeforeJobSchedule` | `BeforeJobScheduleContext` | `JobScheduleResult` | Modify the payload, skip, or fail at enqueue time |
 
-## Hook Context Types
-
-Each hook receives a context struct with relevant data:
-
-### JobStartContext
+`HookResult` variants:
 
 ```rust
-pub struct JobStartContext {
-    pub job: Arc<Job>,        // Full job details
-    pub worker_id: String,    // Worker processing this job
+pub enum HookResult {
+    Continue,           // Default — proceed normally
+    Skip,               // Mark the job complete without running the handler
+    Fail(String),       // Fail with an error message
+    Retry { delay: Duration }, // Retry after delay
 }
 ```
 
-Available job data:
-- `job.task_identifier` - Task name
-- `job.attempts` - Current attempt number
-- `job.created_at` - When job was enqueued
-- `job.priority` - Job priority
-- `job.payload` - Job payload (JSON)
-- ... and more (see GraphileWorker docs)
-
-### JobCompleteContext
+`JobScheduleResult` variants:
 
 ```rust
+pub enum JobScheduleResult {
+    Continue(serde_json::Value), // Proceed with this (possibly modified) payload
+    Skip,                        // Don't enqueue (returns an error to the caller)
+    Fail(String),                // Fail enqueue with a message
+}
+```
+
+## Context shapes
+
+Every event hands you a context struct. The `job` field is an
+`Arc<Job>`; `Job` accessors are *methods*, not fields:
+
+```rust,ignore
+ctx.job.id()                  // i64
+ctx.job.task_identifier()     // &str
+ctx.job.attempts()            // i16
+ctx.job.max_attempts()        // i16
+ctx.job.priority()            // &i16
+ctx.job.created_at()          // &DateTime<Utc>
+ctx.job.run_at()              // &DateTime<Utc>
+ctx.job.payload()             // &serde_json::Value
+ctx.job.key()                 // Option<&str>  (the job_key)
+```
+
+A few of the higher-traffic contexts:
+
+```rust,ignore
 pub struct JobCompleteContext {
     pub job: Arc<Job>,
     pub worker_id: String,
-    pub duration: Duration,   // How long the job took!
+    pub duration: Duration,
 }
-```
 
-**Key feature:** Duration is automatically tracked for you.
-
-### JobFailContext
-
-```rust
 pub struct JobFailContext {
     pub job: Arc<Job>,
     pub worker_id: String,
-    pub error: String,        // Error message
-    pub will_retry: bool,     // True if job will be retried
-}
-```
-
-**Key feature:** `will_retry` tells you if this is a transient failure (will retry) or final failure (exhausted retries or permanent error).
-
-### JobPermanentlyFailContext
-
-```rust
-pub struct JobPermanentlyFailContext {
-    pub job: Arc<Job>,
-    pub worker_id: String,
-    pub error: String,        // Final error message
-}
-```
-
-This fires when a job exhausts all retry attempts or encounters a permanent failure.
-
-### WorkerStartContext / WorkerShutdownContext
-
-```rust
-pub struct WorkerStartContext {
-    pub pool: PgPool,
-    pub worker_id: String,
-    pub extensions: ReadOnlyExtensions,
+    pub error: String,
+    pub will_retry: bool,
 }
 
 pub struct WorkerShutdownContext {
     pub pool: PgPool,
     pub worker_id: String,
-    pub reason: ShutdownReason,  // Signal, Error, or Graceful
+    pub reason: ShutdownReason, // Signal | Error | Graceful
 }
 ```
 
-## Common Patterns
+## Common patterns
 
-### Metrics Plugin
-
-Track job execution metrics automatically:
+### Logging
 
 ```rust
-use backfill::{LifecycleHooks, JobStartContext, JobCompleteContext, JobFailContext};
+use backfill::{
+    HookRegistry, JobComplete, JobCompleteContext, JobFail, JobFailContext,
+    JobStart, JobStartContext, Plugin,
+};
 
-#[derive(Clone)]
-struct MetricsPlugin;
-
-impl LifecycleHooks for MetricsPlugin {
-    async fn on_job_start(&self, ctx: JobStartContext) {
-        metrics::counter!("jobs_started",
-            "task" => ctx.job.task_identifier.clone()
-        ).increment(1);
-    }
-
-    async fn on_job_complete(&self, ctx: JobCompleteContext) {
-        let task = &ctx.job.task_identifier;
-
-        metrics::counter!("jobs_completed",
-            "task" => task.clone()
-        ).increment(1);
-
-        metrics::histogram!("job_duration_seconds",
-            "task" => task.clone(),
-            "status" => "success"
-        ).record(ctx.duration.as_secs_f64());
-    }
-
-    async fn on_job_fail(&self, ctx: JobFailContext) {
-        let status = if ctx.will_retry { "retrying" } else { "failed" };
-
-        metrics::counter!("jobs_failed",
-            "task" => ctx.job.task_identifier.clone(),
-            "status" => status
-        ).increment(1);
-    }
-}
-```
-
-See `examples/metrics_plugin.rs` for a complete working example.
-
-### Logging Plugin
-
-Structured logging for all job events:
-
-```rust
 #[derive(Clone)]
 struct LoggingPlugin;
 
-impl LifecycleHooks for LoggingPlugin {
-    async fn on_job_start(&self, ctx: JobStartContext) {
-        log::info!(
-            "Job started: {} (attempt {}, priority {})",
-            ctx.job.task_identifier,
-            ctx.job.attempts,
-            ctx.job.priority
-        );
-    }
-
-    async fn on_job_complete(&self, ctx: JobCompleteContext) {
-        log::info!(
-            "Job completed: {} in {:.2}s",
-            ctx.job.task_identifier,
-            ctx.duration.as_secs_f64()
-        );
-    }
-
-    async fn on_job_fail(&self, ctx: JobFailContext) {
-        if ctx.will_retry {
-            log::warn!(
-                "Job failed (will retry): {} - {}",
-                ctx.job.task_identifier,
-                ctx.error
+impl Plugin for LoggingPlugin {
+    fn register(self, hooks: &mut HookRegistry) {
+        hooks.on(JobStart, |ctx: JobStartContext| async move {
+            log::info!(
+                "Job started: {} (attempt {})",
+                ctx.job.task_identifier(),
+                ctx.job.attempts(),
             );
-        } else {
-            log::error!(
-                "Job failed permanently: {} - {}",
-                ctx.job.task_identifier,
-                ctx.error
-            );
-        }
-    }
+        });
 
-    async fn on_job_permanently_fail(&self, ctx: JobPermanentlyFailContext) {
-        log::error!(
-            "Job exhausted retries: {} (attempts: {}) - {}",
-            ctx.job.task_identifier,
-            ctx.job.attempts,
-            ctx.error
-        );
+        hooks.on(JobComplete, |ctx: JobCompleteContext| async move {
+            log::info!(
+                "Job completed: {} in {:.2}s",
+                ctx.job.task_identifier(),
+                ctx.duration.as_secs_f64(),
+            );
+        });
+
+        hooks.on(JobFail, |ctx: JobFailContext| async move {
+            if ctx.will_retry {
+                log::warn!(
+                    "Job failed (will retry): {} - {}",
+                    ctx.job.task_identifier(),
+                    ctx.error,
+                );
+            } else {
+                log::error!(
+                    "Job failed (no retry): {} - {}",
+                    ctx.job.task_identifier(),
+                    ctx.error,
+                );
+            }
+        });
     }
 }
 ```
 
-### Job Validation
+### Metrics
 
-Prevent invalid jobs from running using interceptor hooks:
+See [`examples/metrics_plugin.rs`](../examples/metrics_plugin.rs) for a
+complete plugin covering `WorkerStart`, `WorkerShutdown`, `JobStart`,
+`JobComplete`, `JobFail`, `JobPermanentlyFail` — including duration,
+wait-time, and error-type histograms.
 
-```rust
-use backfill::{LifecycleHooks, BeforeJobRunContext, HookResult};
+### Error tracking (Sentry/Rollbar/etc.)
+
+```rust,ignore
+use backfill::{HookRegistry, JobFail, JobFailContext, Plugin};
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct SentryPlugin {
+    client: Arc<sentry::Client>,
+}
+
+impl Plugin for SentryPlugin {
+    fn register(self, hooks: &mut HookRegistry) {
+        let _client = self.client;
+        hooks.on(JobFail, move |ctx: JobFailContext| async move {
+            // Only capture final failures — not transient retries.
+            if ctx.will_retry {
+                return;
+            }
+            sentry::capture_message(
+                &format!("Job {} failed: {}", ctx.job.task_identifier(), ctx.error),
+                sentry::Level::Error,
+            );
+        });
+    }
+}
+```
+
+### Validation (interceptor)
+
+`BeforeJobRun` lets you skip or fail a job before its handler runs.
+Useful for kill switches, feature flags, or payload validation that
+should bypass the handler entirely.
+
+```rust,ignore
+use backfill::{BeforeJobRun, BeforeJobRunContext, HookRegistry, HookResult, Plugin};
 
 #[derive(Clone)]
 struct ValidationPlugin;
 
-impl LifecycleHooks for ValidationPlugin {
-    async fn before_job_run(&self, ctx: BeforeJobRunContext) -> HookResult {
-        // Check if job payload has required fields
-        if let Some(user_id) = ctx.payload.get("user_id") {
-            if user_id.as_str().map_or(false, |s| s.is_empty()) {
-                return HookResult::Fail("Invalid user_id".to_string());
+impl Plugin for ValidationPlugin {
+    fn register(self, hooks: &mut HookRegistry) {
+        hooks.on(BeforeJobRun, |ctx: BeforeJobRunContext| async move {
+            if ctx.payload.get("user_id").is_none() {
+                return HookResult::Fail("missing user_id".to_string());
             }
-        } else {
-            return HookResult::Fail("Missing user_id".to_string());
-        }
-
-        // Check feature flags, rate limits, etc.
-        if is_feature_disabled(&ctx.job.task_identifier) {
-            return HookResult::Skip; // Skip execution, mark as complete
-        }
-
-        HookResult::Continue
+            if is_feature_disabled(ctx.job.task_identifier()) {
+                return HookResult::Skip;
+            }
+            HookResult::Continue
+        });
     }
 }
 
-fn is_feature_disabled(task: &str) -> bool {
-    // Check your feature flag system
-    false
-}
+fn is_feature_disabled(_task: &str) -> bool { false }
 ```
 
-**HookResult options:**
-- `Continue` - Proceed with normal execution
-- `Skip` - Mark job as complete without running it
-- `Fail(msg)` - Fail the job with error message
-- `Retry { delay }` - Retry job after delay
+### Payload enrichment (interceptor)
 
-### Error Tracking
+`BeforeJobSchedule` runs before the row is inserted into
+`_private_jobs`, so it can add metadata or rewrite payloads.
 
-Send errors to Sentry, Rollbar, etc.:
-
-```rust
-use backfill::{LifecycleHooks, JobFailContext, JobPermanentlyFailContext};
+```rust,ignore
+use backfill::{BeforeJobSchedule, BeforeJobScheduleContext, HookRegistry, JobScheduleResult, Plugin};
+use serde_json::json;
 
 #[derive(Clone)]
-struct ErrorTrackingPlugin {
-    sentry_client: Arc<sentry::Client>,
-}
+struct EnrichmentPlugin;
 
-impl LifecycleHooks for ErrorTrackingPlugin {
-    async fn on_job_fail(&self, ctx: JobFailContext) {
-        // Only send to Sentry if NOT retrying (reduce noise)
-        if !ctx.will_retry {
-            sentry::capture_message(
-                &format!("Job {} failed: {}", ctx.job.task_identifier, ctx.error),
-                sentry::Level::Error,
-            );
-        }
-    }
-
-    async fn on_job_permanently_fail(&self, ctx: JobPermanentlyFailContext) {
-        // Send with full context
-        sentry::with_scope(
-            |scope| {
-                scope.set_tag("task", &ctx.job.task_identifier);
-                scope.set_extra("attempts", ctx.job.attempts.into());
-                scope.set_extra("job_id", ctx.job.id.into());
-            },
-            || {
-                sentry::capture_message(
-                    &format!("Job permanently failed: {}", ctx.error),
-                    sentry::Level::Error,
+impl Plugin for EnrichmentPlugin {
+    fn register(self, hooks: &mut HookRegistry) {
+        hooks.on(BeforeJobSchedule, |ctx: BeforeJobScheduleContext| async move {
+            let mut payload = ctx.payload.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "scheduled_at".to_string(),
+                    json!(chrono::Utc::now().to_rfc3339()),
                 );
-            },
-        );
+            }
+            JobScheduleResult::Continue(payload)
+        });
     }
 }
 ```
 
-## Advanced Features
+## Multiple plugins
 
-### Payload Transformation
-
-Modify job payloads before they're inserted into the database:
-
-```rust
-use backfill::{LifecycleHooks, BeforeJobScheduleContext, JobScheduleResult};
-
-#[derive(Clone)]
-struct PayloadEnrichmentPlugin;
-
-impl LifecycleHooks for PayloadEnrichmentPlugin {
-    async fn before_job_schedule(&self, ctx: BeforeJobScheduleContext) -> JobScheduleResult {
-        let mut payload = ctx.payload.clone();
-
-        // Add metadata
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("scheduled_at".to_string(),
-                json!(chrono::Utc::now().to_rfc3339()));
-            obj.insert("version".to_string(), json!("1.0"));
-        }
-
-        JobScheduleResult::Continue(payload)
-    }
-}
-```
-
-**JobScheduleResult options:**
-- `Continue(payload)` - Continue with (possibly modified) payload
-- `Skip` - Don't schedule the job (returns error to caller)
-- `Fail(msg)` - Fail scheduling with error message
-
-### Wait Time Tracking
-
-Calculate how long jobs wait in the queue:
+You can register as many plugins as you like. Observer events are
+delivered to every registered handler. Interceptor events run in
+registration order; once a handler returns `Skip` / `Fail`, later
+handlers don't see the event for that job.
 
 ```rust
-impl LifecycleHooks for MetricsPlugin {
-    async fn on_job_start(&self, ctx: JobStartContext) {
-        if let Some(created_at) = ctx.job.created_at.as_ref() {
-            let wait_time = chrono::Utc::now()
-                .signed_duration_since(*created_at)
-                .num_milliseconds() as f64 / 1000.0;
-
-            metrics::histogram!("job_wait_time_seconds",
-                "task" => ctx.job.task_identifier.clone()
-            ).record(wait_time);
-        }
-    }
-}
-```
-
-## Multiple Plugins
-
-You can register multiple plugins - they're called in registration order:
-
-```rust
-let worker = WorkerRunner::builder(config).await?
-    .define_job::<MyJob>()
+# use backfill::{WorkerRunner, WorkerConfig};
+# #[derive(Clone)] struct MetricsPlugin;
+# impl backfill::Plugin for MetricsPlugin { fn register(self, _: &mut backfill::HookRegistry) {} }
+# #[derive(Clone)] struct LoggingPlugin;
+# impl backfill::Plugin for LoggingPlugin { fn register(self, _: &mut backfill::HookRegistry) {} }
+# #[derive(Clone)] struct ValidationPlugin;
+# impl backfill::Plugin for ValidationPlugin { fn register(self, _: &mut backfill::HookRegistry) {} }
+# async fn build(config: WorkerConfig) -> Result<(), backfill::BackfillError> {
+let _worker = WorkerRunner::builder(config).await?
+    // .define_job::<MyJob>()
+    .add_plugin(ValidationPlugin)  // interceptors first
     .add_plugin(MetricsPlugin)
     .add_plugin(LoggingPlugin)
-    .add_plugin(ValidationPlugin)
     .build().await?;
+# Ok(())
+# }
 ```
 
-**Execution order:**
-1. Plugins called in registration order for observer hooks
-2. For interceptor hooks (`before_job_run`, etc.):
-   - If one plugin returns `Skip` or `Fail`, subsequent plugins are NOT called
-   - For `before_job_schedule` with `Continue(payload)`, the transformed payload is passed to the next plugin
+A practical ordering rule: put validation / interceptor plugins
+*before* observation / metrics plugins. Otherwise your metrics will
+show jobs as starting that the validator turned around.
 
-**Best practices:**
-- Put validation plugins first (they might skip/fail jobs)
-- Put metrics/logging plugins last (they should see the final decision)
+## Auto-registered plugins
 
-## Migration from JobMetrics
+When you set `dlq_processor_interval = Some(_)` on `WorkerConfig`,
+backfill automatically registers two plugins:
 
-If you were using the old `JobMetrics` helper, here's how to migrate:
+- **`DlqCleanupPlugin`** (`JobComplete`): when a requeued job succeeds,
+  removes the matching DLQ row by `job_key`. This stops a successful
+  job from being requeued again later.
+- **`PermanentFailurePlugin`** (`JobFail`): classifies the error via
+  `WorkerError::classify_from_message`. If the error is non-retryable
+  (`ValidationFailed`, `Unauthorized`, …), sets
+  `attempts = max_attempts` so the next DLQ-processor tick captures it
+  rather than retrying for hours.
 
-**Before (manual instrumentation):**
-```rust
-impl TaskHandler for MyJob {
-    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        JobMetrics::new("my_queue", Self::IDENTIFIER, &ctx)
-            .instrument(|| async {
-                // Job logic
-            })
-            .await
-    }
-}
-```
+You don't need to register either of these yourself; both are part of
+the standard DLQ machinery.
 
-**After (lifecycle hooks):**
-```rust
-// 1. Remove JobMetrics from job handlers
-impl TaskHandler for MyJob {
-    async fn run(self, ctx: WorkerContext) -> impl IntoTaskHandlerResult {
-        // Just your job logic, no metrics!
-        Ok(())
-    }
-}
+## See also
 
-// 2. Add a metrics plugin when building the worker
-let worker = WorkerRunner::builder(config).await?
-    .define_job::<MyJob>()
-    .add_plugin(MetricsPlugin)  // Now handles ALL jobs automatically
-    .build().await?;
-```
-
-**Benefits:**
-- No manual instrumentation needed in every job handler
-- Metrics are consistent across all jobs
-- Richer data (duration, will_retry, etc.)
-- Can change metrics implementation without touching job code
-
-## See Also
-
-- `examples/metrics_plugin.rs` - Complete working metrics plugin example
-- `tests/plugin_tests.rs` - Plugin integration tests
-- [GraphileWorker Lifecycle Hooks Documentation](https://github.com/graphile/worker) - Upstream docs
+- [`examples/metrics_plugin.rs`](../examples/metrics_plugin.rs) — full
+  metrics plugin
+- [`tests/plugin_tests.rs`](../tests/plugin_tests.rs) — integration
+  tests exercising the observer hooks
+- [`src/dlq_cleanup_plugin.rs`](../src/dlq_cleanup_plugin.rs),
+  [`src/permanent_failure_plugin.rs`](../src/permanent_failure_plugin.rs)
+  — the in-tree plugins, both ~100 lines each
+- [graphile_worker source](https://lib.rs/crates/graphile_worker) — the
+  upstream lifecycle hook implementation

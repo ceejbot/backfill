@@ -270,13 +270,14 @@ impl WorkerConfig {
     }
 }
 
-/// Cloneable wrapper around WorkerOptions configuration
+/// Cloneable wrapper around WorkerOptions configuration.
 ///
-/// This allows us to store the configuration needed to create WorkerOptions
-/// and recreate them as needed, since the underlying WorkerOptions doesn't
-/// implement Clone.
+/// `WorkerOptions` itself is `!Clone`, so this is the snapshot we keep on
+/// `WorkerRunner` and re-materialize each time `create_worker` runs. Crate-
+/// private — callers should configure the worker through
+/// [`WorkerRunnerBuilder`].
 #[derive(Clone)]
-pub struct WorkerOptionsBuilder {
+pub(crate) struct WorkerOptionsBuilder {
     pub(crate) schema: String,
     pub(crate) poll_interval: Duration,
     pub(crate) pool: sqlx::PgPool,
@@ -285,17 +286,17 @@ pub struct WorkerOptionsBuilder {
     pub(crate) crontabs: Vec<String>,
 }
 
-/// Configuration for a job handler that can be recreated
+/// Stored job-handler registration. The `fn` pointer captures a
+/// monomorphized `WorkerOptions::define_job::<T>` so we can re-apply it when
+/// the worker is rebuilt.
 #[derive(Clone)]
 pub(crate) struct JobHandlerConfig {
-    #[allow(dead_code)]
-    pub identifier: String,
     pub builder_fn: fn(WorkerOptions) -> WorkerOptions,
 }
 
 impl WorkerOptionsBuilder {
     /// Create a new WorkerOptionsBuilder from config
-    pub async fn new(config: &WorkerConfig) -> Result<Self, BackfillError> {
+    pub(crate) async fn new(config: &WorkerConfig) -> Result<Self, BackfillError> {
         // Create client to get the pool
         let client = if config.schema == "graphile_worker" {
             BackfillClient::new(&config.database_url).await?
@@ -319,64 +320,18 @@ impl WorkerOptionsBuilder {
     }
 
     /// Register a job type with this builder
-    pub fn define_job<T: TaskHandler + 'static>(mut self) -> Self {
+    pub(crate) fn define_job<T: TaskHandler + 'static>(mut self) -> Self {
         // Store a function that can add this job type to WorkerOptions
         let builder_fn = |worker_options: WorkerOptions| worker_options.define_job::<T>();
 
-        self.job_handlers.push(JobHandlerConfig {
-            identifier: T::IDENTIFIER.to_string(),
-            builder_fn,
-        });
+        self.job_handlers.push(JobHandlerConfig { builder_fn });
 
         self
     }
 
-    /// Set the concurrency for this worker
-    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.concurrency = concurrency;
-        self
-    }
-
-    /// Add a cron schedule for periodic job execution
-    ///
-    /// # Syntax
-    /// The crontab format is: `<timer> <task_identifier> ?<options>
-    /// {<payload>}`
-    ///
-    /// - **Timer**: Standard 5-field cron syntax (minute hour day month
-    ///   day-of-week)
-    /// - **Task**: Must match a registered job handler's IDENTIFIER
-    /// - **Options**: Query string format for job configuration
-    ///   - `fill`: Backfill period (e.g., `?fill=10m` to execute missed runs
-    ///     within 10 minutes)
-    ///   - `job_key`: Unique identifier for deduplication
-    ///   - `job_key_mode`: How to handle duplicates (`replace`,
-    ///     `preserve_run_at`, etc.)
-    ///   - `priority`: Job priority (default: 0)
-    ///   - `max`: Maximum attempts (default: 25)
-    ///   - `queue`: Queue name (default: task identifier)
-    /// - **Payload**: Optional JSON object to pass to the job handler
-    ///
-    /// # Examples
-    /// ```rust,no_run
-    /// # use backfill::{WorkerRunner, WorkerConfig};
-    /// # async fn example() -> Result<(), backfill::BackfillError> {
-    /// # let config = WorkerConfig::default();
-    /// WorkerRunner::builder(config).await?
-    ///     // Every 5 minutes
-    ///     .add_cron_schedule("*/5 * * * * cleanup_task")?
-    ///     // Daily at 2:00 AM with backfill
-    ///     .add_cron_schedule("0 2 * * * backup_task ?fill=1h")?
-    ///     // With payload
-    ///     .add_cron_schedule(r#"0 * * * * report_task {\"format\":\"pdf\"}"#)?
-    ///     .build().await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    /// Returns `BackfillError::CrontabParse` if the cron syntax is invalid.
-    pub fn add_cron_schedule(mut self, spec: &str) -> Result<Self, crate::BackfillError> {
+    /// Validate and store a crontab spec. Public docs live on
+    /// [`WorkerRunnerBuilder::add_cron_schedule`].
+    pub(crate) fn add_cron_schedule(mut self, spec: &str) -> Result<Self, crate::BackfillError> {
         // Validate the crontab spec by attempting to parse it
         use graphile_worker_crontab_parser::parse_crontab;
         parse_crontab(spec)?;
@@ -519,17 +474,30 @@ impl WorkerRunnerBuilder {
         self
     }
 
-    /// Add a cron schedule for periodic job execution
+    /// Add a cron schedule for periodic job execution.
     ///
-    /// Schedules a task to run automatically at specified intervals using cron
-    /// syntax. The task must be registered with `define_job()` before
-    /// adding a cron schedule.
+    /// Schedules a task to run automatically at specified intervals. The task
+    /// must be registered with [`Self::define_job`] before adding a cron
+    /// schedule (the runtime won't reject an unknown identifier here, but the
+    /// scheduled job will fail when it fires).
     ///
     /// # Syntax
-    /// `<timer> <task_identifier> ?<options> {<payload>}`
+    /// The crontab format is: `<timer> <task_identifier> ?<options>
+    /// {<payload>}`
     ///
-    /// See [`WorkerOptionsBuilder::add_cron_schedule`] for detailed syntax
-    /// documentation.
+    /// - **Timer**: Standard 5-field cron syntax (minute hour day month
+    ///   day-of-week)
+    /// - **Task**: Must match a registered job handler's `IDENTIFIER`
+    /// - **Options**: Query string format for job configuration
+    ///   - `fill`: Backfill period (e.g., `?fill=10m` to execute missed runs
+    ///     within 10 minutes)
+    ///   - `job_key`: Unique identifier for deduplication
+    ///   - `job_key_mode`: How to handle duplicates (`replace`,
+    ///     `preserve_run_at`, etc.)
+    ///   - `priority`: Job priority (default: 0)
+    ///   - `max`: Maximum attempts (default: 25)
+    ///   - `queue`: Queue name (default: task identifier)
+    /// - **Payload**: Optional JSON object to pass to the job handler
     ///
     /// # Examples
     /// ```rust,no_run
@@ -545,7 +513,10 @@ impl WorkerRunnerBuilder {
     /// # let config = WorkerConfig::default();
     /// let worker = WorkerRunner::builder(config).await?
     ///     .define_job::<CleanupTask>()
-    ///     .add_cron_schedule("*/5 * * * * cleanup")?  // Every 5 minutes
+    ///     // Every 5 minutes
+    ///     .add_cron_schedule("*/5 * * * * cleanup")?
+    ///     // Daily at 2:00 AM with backfill
+    ///     .add_cron_schedule("0 2 * * * cleanup ?fill=1h")?
     ///     .build().await?;
     /// # Ok(())
     /// # }

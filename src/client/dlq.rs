@@ -56,6 +56,36 @@ pub struct DlqJob {
     pub notes: Option<String>,
 }
 
+impl DlqJob {
+    /// Map a `backfill_dlq` row into a `DlqJob`.
+    ///
+    /// Every site that selects the full set of `backfill_dlq` columns goes
+    /// through this so adding a column is a single-edit change. Callers must
+    /// have selected every column referenced below; mismatches surface as a
+    /// `sqlx::Error::ColumnNotFound` at runtime.
+    fn from_row(row: &sqlx::postgres::PgRow) -> Self {
+        Self {
+            id: row.get("id"),
+            original_job_id: row.get("original_job_id"),
+            task_identifier: row.get("task_identifier"),
+            payload: row.get("payload"),
+            queue_name: row.get("queue_name"),
+            priority: row.get("priority"),
+            job_key: row.get("job_key"),
+            max_attempts: row.get("max_attempts"),
+            failure_reason: row.get("failure_reason"),
+            failure_count: row.get("failure_count"),
+            last_error: row.get("last_error"),
+            original_created_at: row.get("original_created_at"),
+            original_run_at: row.get("original_run_at"),
+            failed_at: row.get("failed_at"),
+            requeued_count: row.get("requeued_count"),
+            last_requeued_at: row.get("last_requeued_at"),
+            notes: row.get("notes"),
+        }
+    }
+}
+
 /// Filter parameters for querying DLQ jobs.
 #[derive(Debug, Clone, Default)]
 pub struct DlqFilter {
@@ -224,28 +254,7 @@ impl BackfillClient {
 
         let rows = query_builder.build().fetch_all(&self.pool).await?;
 
-        let jobs: Vec<DlqJob> = rows
-            .into_iter()
-            .map(|row| DlqJob {
-                id: row.get("id"),
-                original_job_id: row.get("original_job_id"),
-                task_identifier: row.get("task_identifier"),
-                payload: row.get("payload"),
-                queue_name: row.get("queue_name"),
-                priority: row.get("priority"),
-                job_key: row.get("job_key"),
-                max_attempts: row.get("max_attempts"),
-                failure_reason: row.get("failure_reason"),
-                failure_count: row.get("failure_count"),
-                last_error: row.get("last_error"),
-                original_created_at: row.get("original_created_at"),
-                original_run_at: row.get("original_run_at"),
-                failed_at: row.get("failed_at"),
-                requeued_count: row.get("requeued_count"),
-                last_requeued_at: row.get("last_requeued_at"),
-                notes: row.get("notes"),
-            })
-            .collect();
+        let jobs: Vec<DlqJob> = rows.iter().map(DlqJob::from_row).collect();
 
         // Record DLQ age metrics for monitoring
         let now = Utc::now();
@@ -299,25 +308,7 @@ impl BackfillClient {
         let row = sqlx::query(&query).bind(dlq_id).fetch_optional(&self.pool).await?;
 
         Ok(row.map(|row| {
-            let job = DlqJob {
-                id: row.get("id"),
-                original_job_id: row.get("original_job_id"),
-                task_identifier: row.get("task_identifier"),
-                payload: row.get("payload"),
-                queue_name: row.get("queue_name"),
-                priority: row.get("priority"),
-                job_key: row.get("job_key"),
-                max_attempts: row.get("max_attempts"),
-                failure_reason: row.get("failure_reason"),
-                failure_count: row.get("failure_count"),
-                last_error: row.get("last_error"),
-                original_created_at: row.get("original_created_at"),
-                original_run_at: row.get("original_run_at"),
-                failed_at: row.get("failed_at"),
-                requeued_count: row.get("requeued_count"),
-                last_requeued_at: row.get("last_requeued_at"),
-                notes: row.get("notes"),
-            };
+            let job = DlqJob::from_row(&row);
 
             // Record DLQ age metric
             let age_seconds = (Utc::now() - job.failed_at).num_seconds() as f64;
@@ -601,25 +592,7 @@ impl BackfillClient {
             .fetch_one(&self.pool)
             .await?;
 
-        let dlq_job = DlqJob {
-            id: row.get("id"),
-            original_job_id: row.get("original_job_id"),
-            task_identifier: row.get("task_identifier"),
-            payload: row.get("payload"),
-            queue_name: row.get("queue_name"),
-            priority: row.get("priority"),
-            job_key: row.get("job_key"),
-            max_attempts: row.get("max_attempts"),
-            failure_reason: row.get("failure_reason"),
-            failure_count: row.get("failure_count"),
-            last_error: row.get("last_error"),
-            original_created_at: row.get("original_created_at"),
-            original_run_at: row.get("original_run_at"),
-            failed_at: row.get("failed_at"),
-            requeued_count: row.get("requeued_count"),
-            last_requeued_at: row.get("last_requeued_at"),
-            notes: row.get("notes"),
-        };
+        let dlq_job = DlqJob::from_row(&row);
 
         // Record metrics
         crate::metrics::record_db_operation("dlq_add", "success");

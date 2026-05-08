@@ -9,11 +9,13 @@ A boringly-named priority queue system for doing async work. This library and wo
 
 This is a postgres-backed async work queue library that is a set of conveniences and features on top of the rust port of Graphile Worker. It gives you a library you can integrate with your own project to handle background tasks.
 
-> **Status**: Core features are complete and covered by an integration test
-> suite. The library is suitable for production use for job enqueueing,
-> worker processing, and DLQ management. The Admin API (feature-gated) is
-> experimental. See [CHANGELOG.md](CHANGELOG.md) for details and
-> [Known Limitations](docs/02-dlq.md#known-limitations).
+> **Status**: Core features (job enqueueing, worker processing, DLQ
+> management, lifecycle plugins, stale-lock cleanup) are complete and
+> covered by an integration test suite. The Admin API (feature-gated
+> behind `axum`) is also stable, except for two stub endpoints —
+> `GET /jobs/{id}` and `DELETE /jobs/{id}/cancel` — that return 501. See
+> [CHANGELOG.md](CHANGELOG.md) for details and [Known
+> Limitations](docs/02-dlq.md#known-limitations).
 
 ### What's New Over graphile_worker
 
@@ -70,7 +72,8 @@ All built on graphile_worker's rock-solid foundation of PostgreSQL SKIP LOCKED a
   auto-registered lifecycle plugin.
 - **Metrics**: Comprehensive metrics via the `metrics` crate — bring your
   own exporter (Prometheus, StatsD, etc.).
-- **Monitoring**: Structured logging and tracing throughout.
+- **Logging**: Structured logging via the `log` crate facade — bring your
+  own sink (`env_logger`, `tracing-log`, etc.).
 - **Building blocks for an axum admin api**: via a router you can mount on
   your own axum api server.
 
@@ -80,7 +83,7 @@ Look at the `examples/` directory and the readme there for practical usage examp
 
 Read these in order for the best learning experience:
 
-1. **[Database Setup](docs/01-database-setup.md)** - PostgreSQL configuration, automatic schema management, and SQLx compile-time verification
+1. **[Database Setup](docs/01-database-setup.md)** - PostgreSQL configuration and automatic schema management
 2. **[Dead Letter Queue (DLQ)](docs/02-dlq.md)** - Comprehensive guide to handling failed jobs:
    - How the DLQ works and why it's essential
    - Client API and HTTP admin API usage
@@ -94,13 +97,13 @@ Read these in order for the best learning experience:
 
 ## Configuration and setup
 
-All configuration is passed in via environment variables:
+The library itself takes configuration through [`WorkerConfig`](#workerconfig-options)
+— there are no implicit environment variables. The bundled examples
+(`examples/basic_worker.rs` etc.) read a few env vars on top of that for
+convenience:
 
 - `DATABASE_URL`: PostgreSQL connection string
-- `FAST_QUEUE_CONCURRENCY`: Workers for high-priority jobs (default: 10)
-- `BULK_QUEUE_CONCURRENCY`: Workers for bulk processing (default: 5)
-- `POLL_INTERVAL_MS`: Job polling interval (default: 200ms)
-- `RUST_LOG`: Logging configuration
+- `RUST_LOG`: log level for `env_logger` (e.g., `info`, `backfill=debug`)
 
 ### WorkerConfig Options
 
@@ -161,7 +164,15 @@ The `graphile_worker` crate sets up all its database tables with no action neede
 ```rust
 use backfill::BackfillClient;
 
-let client = BackfillClient::new("postgresql://localhost/mydb", "my_schema").await?;
+// Default schema ("graphile_worker"):
+let client = BackfillClient::new("postgresql://localhost/mydb").await?;
+
+// Custom schema:
+let client = BackfillClient::new_with_schema(
+    "postgresql://localhost/mydb",
+    "my_schema",
+).await?;
+
 client.init_dlq().await?;  // Creates DLQ table if needed
 ```
 

@@ -76,14 +76,12 @@ client.enqueue("process_payment", &payload, spec).await?;
 The DLQ processor runs as a background task, periodically scanning for failed jobs:
 
 ```rust
-// Configure DLQ processor interval
-let worker_config = WorkerConfig {
-    database_url: "postgresql://localhost/mydb".to_string(),
-    schema: "graphile_worker".to_string(),
-    // Scan for failed jobs every 60 seconds
-    dlq_processor_interval: Some(Duration::from_secs(60)),
-    ..Default::default()
-};
+use backfill::WorkerConfig;
+use std::time::Duration;
+
+// Configure DLQ processor interval (60s is the default)
+let worker_config = WorkerConfig::new("postgresql://localhost/mydb")
+    .with_dlq_processor_interval(Some(Duration::from_secs(60)));
 ```
 
 **How it works:**
@@ -142,30 +140,22 @@ psql -d your_database -f docs/dlq_schema.sql
 sed 's/graphile_worker/your_schema/g' docs/dlq_schema.sql | psql -d your_database
 ```
 
-See [`DLQ_MIGRATIONS.md`](DLQ_MIGRATIONS.md) for integration with migration tools (Diesel, SQLx, Refinery).
+See [DLQ Migrations](06-dlq-migrations.md) for integration with migration tools (Diesel, SQLx, Refinery).
 
 ### Worker Configuration
 
 Enable DLQ processing in your worker:
 
 ```rust
-use backfill::{WorkerConfig, WorkerRunner, QueueConfig};
+use backfill::{WorkerConfig, WorkerRunner};
 use std::time::Duration;
 
-let config = WorkerConfig {
-    database_url: "postgresql://localhost/mydb".to_string(),
-    schema: "graphile_worker".to_string(),
-    
-    queue_configs: vec![
-        QueueConfig::named_queue("fast", 10),
-        QueueConfig::named_queue("bulk", 5),
-    ],
-    
-    // Scan for failed jobs every 60 seconds
-    dlq_processor_interval: Some(Duration::from_secs(60)),
-    
-    poll_interval: Duration::from_millis(200),
-};
+let config = WorkerConfig::new("postgresql://localhost/mydb")
+    .with_concurrency(10)
+    .with_poll_interval(Duration::from_millis(200))
+    // Scan for permanently-failed jobs every 60 seconds. The DLQ
+    // processor is enabled by default; pass `None` to disable.
+    .with_dlq_processor_interval(Some(Duration::from_secs(60)));
 
 let worker = WorkerRunner::builder(config)
     .await?
@@ -173,6 +163,11 @@ let worker = WorkerRunner::builder(config)
     .build()
     .await?;
 ```
+
+Per-job queue routing happens at *enqueue* time via `Queue::serial(name)`
+or the default `Queue::Parallel`; there is no worker-level queue filter.
+To run multiple specialized workers, spawn multiple `WorkerRunner`
+instances yourself.
 
 ### Environment Configuration
 
@@ -344,7 +339,7 @@ let app = Router::new()
     .with_state(AppState { backfill: client });
 ```
 
-See [`ADMIN_API.md`](ADMIN_API.md) for complete API documentation.
+See [Admin API Reference](04-admin-api.md) for complete API documentation.
 
 ### API Endpoints
 
@@ -942,10 +937,10 @@ For most production use cases, the current implementation provides all needed fu
 
 ## See Also
 
-- [Admin API Documentation](ADMIN_API.md) - Complete HTTP API reference
-- [DLQ Migrations Guide](DLQ_MIGRATIONS.md) - Database schema setup
-- [Database Setup](DATABASE_SETUP.md) - PostgreSQL configuration
-- [Testing Guide](TESTING.md) - Testing DLQ functionality
+- [Admin API Reference](04-admin-api.md) - Complete HTTP API reference
+- [DLQ Migrations](06-dlq-migrations.md) - Database schema setup
+- [Database Setup](01-database-setup.md) - PostgreSQL configuration
+- [Testing Guide](05-testing.md) - Testing DLQ functionality
 
 ## Support
 

@@ -43,8 +43,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{delete, get, post};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
 
 use crate::BackfillClient;
 use crate::client::DlqFilter;
