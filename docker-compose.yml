@@ -8,7 +8,8 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: backfill-test-db
+    # No container_name: a fixed name clashes with leftovers from other
+    # compose projects. Compose prefixes with the project directory instead.
     environment:
       POSTGRES_USER: backfill
       POSTGRES_PASSWORD: backfill

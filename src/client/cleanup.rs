@@ -69,7 +69,7 @@ impl BackfillClient {
             schema = self.schema,
         );
 
-        let result = sqlx::query(&query)
+        let result = sqlx::query(crate::audited_sql(query))
             .bind(timeout_secs as i64)
             .execute(&self.pool)
             .await?;
@@ -114,7 +114,7 @@ impl BackfillClient {
             schema = self.schema,
         );
 
-        let result = sqlx::query(&query)
+        let result = sqlx::query(crate::audited_sql(query))
             .bind(timeout_secs as i64)
             .execute(&self.pool)
             .await?;
@@ -172,7 +172,7 @@ impl BackfillClient {
             schema = self.schema
         );
 
-        let result = sqlx::query(&query).execute(&self.pool).await?;
+        let result = sqlx::query(crate::audited_sql(query)).execute(&self.pool).await?;
         let deleted = result.rows_affected();
 
         // Emit metric

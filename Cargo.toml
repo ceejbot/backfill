@@ -1,8 +1,9 @@
 [package]
 name = "backfill"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
-rust-version = "1.85"
+# sqlx 0.9 declares 1.94.0; that is the floor for this crate too.
+rust-version = "1.94"
 description = "A boringly-named priority work queue system for doing async tasks."
 categories = ["concurrency", "database"]
 keywords = ["queue", "jobs", "postgresql", "graphile-worker", "async"]
@@ -22,20 +23,21 @@ axum = ["dep:axum"]
 chrono = { version = "0.4", features = ["serde"] }
 # IMPORTANT: backfill queries graphile_worker's internal `_private_*` tables
 # directly (cleanup, DLQ scanner, admin endpoints). The `_private_*` prefix
-# signals these are internal API. Even within 0.11.x, a patch release that
+# signals these are internal API. Even within 0.13.x, a patch release that
 # touches the internal schema can silently break backfill — re-run the
 # integration tests against any new graphile_worker version before shipping.
-graphile_worker = "0.11.1"
-graphile_worker_crontab_parser = "0.5.12"
+graphile_worker = "0.13"
+graphile_worker_crontab_parser = "0.5.24"
 log = "0.4.28"
 metrics = "0.24"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-ring", "postgres", "chrono", "uuid", "json", "macros"] }
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
 uuid = { version = "1.0", features = ["v4", "v7", "serde"] }
+whoami = { version = "2", features = ["std"] }
 
 # Optional dependencies for admin API
 axum = { version = "0.8", optional = true }
@@ -46,7 +48,7 @@ env_logger = "0.11"
 fastrand = "2.0"
 metrics-exporter-prometheus = "0.18.1"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

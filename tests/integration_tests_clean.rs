@@ -53,9 +53,12 @@ where
     let result = test_fn(client).await;
 
     // Clean up: drop the test schema
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE",
+        schema_name
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
 
@@ -88,7 +91,7 @@ async fn test_basic_job_enqueue() -> Result<()> {
 
         // Check the job exists in the database
         let pool = client.pool();
-        let row: (i64,) = sqlx::query_as(&format!(
+        let row: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "
             SELECT COUNT(*) FROM {}.\"_private_jobs\" j
             JOIN {}.\"_private_tasks\" t ON j.task_id = t.id
@@ -96,7 +99,7 @@ async fn test_basic_job_enqueue() -> Result<()> {
         ",
             client.schema(),
             client.schema()
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -151,7 +154,7 @@ async fn test_priority_ordering() -> Result<()> {
 
         // Verify jobs are ordered by priority
         let pool = client.pool();
-        let priorities: Vec<(i16,)> = sqlx::query_as(&format!(
+        let priorities: Vec<(i16,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "
             SELECT j.priority FROM {}.\"_private_jobs\" j
             JOIN {}.\"_private_tasks\" t ON j.task_id = t.id
@@ -160,7 +163,7 @@ async fn test_priority_ordering() -> Result<()> {
         ",
             client.schema(),
             client.schema()
-        ))
+        )))
         .fetch_all(pool)
         .await?;
 
@@ -218,7 +221,7 @@ async fn test_serial_queues() -> Result<()> {
 
         // Verify jobs are in their respective queues
         let pool = client.pool();
-        let fast_count: (i64,) = sqlx::query_as(&format!(
+        let fast_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "
             SELECT COUNT(*) FROM {}.\"_private_jobs\" j
             JOIN {}.\"_private_job_queues\" q ON j.job_queue_id = q.id
@@ -226,11 +229,11 @@ async fn test_serial_queues() -> Result<()> {
         ",
             client.schema(),
             client.schema()
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
-        let bulk_count: (i64,) = sqlx::query_as(&format!(
+        let bulk_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "
             SELECT COUNT(*) FROM {}.\"_private_jobs\" j
             JOIN {}.\"_private_job_queues\" q ON j.job_queue_id = q.id
@@ -238,11 +241,11 @@ async fn test_serial_queues() -> Result<()> {
         ",
             client.schema(),
             client.schema()
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
-        let custom_count: (i64,) = sqlx::query_as(&format!(
+        let custom_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "
             SELECT COUNT(*) FROM {}.\"_private_jobs\" j
             JOIN {}.\"_private_job_queues\" q ON j.job_queue_id = q.id
@@ -250,7 +253,7 @@ async fn test_serial_queues() -> Result<()> {
         ",
             client.schema(),
             client.schema()
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -304,10 +307,10 @@ async fn test_job_key_idempotency() -> Result<()> {
 
         // The second job should replace the first (or be the same job)
         let pool = client.pool();
-        let count: (i64,) = sqlx::query_as(&format!(
+        let count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE key = $1",
             client.schema()
-        ))
+        )))
         .bind(&job_key)
         .fetch_one(pool)
         .await?;
@@ -347,10 +350,10 @@ async fn test_job_key_already_in_progress() -> Result<()> {
 
         // Simulate the job being locked by a worker
         let pool = client.pool();
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE {}.\"_private_jobs\" SET locked_at = NOW(), locked_by = 'test_worker' WHERE key = $1",
             client.schema()
-        ))
+        )))
         .bind(&job_key)
         .execute(pool)
         .await?;
@@ -400,10 +403,10 @@ async fn test_convenience_functions() -> Result<()> {
         let pool = client.pool();
 
         // Fast job: parallel execution with FAST_DEFAULT priority (-5)
-        let fast_job_data: (Option<i32>, i16) = sqlx::query_as(&format!(
+        let fast_job_data: (Option<i32>, i16) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT job_queue_id, priority FROM {}.\"_private_jobs\" WHERE key = 'fast_job_key'",
             client.schema()
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -414,10 +417,10 @@ async fn test_convenience_functions() -> Result<()> {
         assert_eq!(fast_job_data.1, -5, "Fast jobs should have FAST_DEFAULT priority");
 
         // Bulk job: parallel execution with BULK_DEFAULT priority (0)
-        let bulk_job_data: (Option<i32>, i16) = sqlx::query_as(&format!(
+        let bulk_job_data: (Option<i32>, i16) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT job_queue_id, priority FROM {}.\"_private_jobs\" WHERE key = 'bulk_job_key'",
             client.schema()
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -457,10 +460,10 @@ async fn test_job_utilities() -> Result<()> {
 
         // Verify the job was removed
         let pool = client.pool();
-        let count: (i64,) = sqlx::query_as(&format!(
+        let count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE key = 'test_key'",
             client.schema()
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -525,19 +528,22 @@ async fn test_cron_schedule_registration() -> Result<()> {
     // Verify cron table infrastructure exists
     let pool = PgPool::connect(&database_url).await?;
 
-    let table_exists: (bool,) = sqlx::query_as(&format!(
+    let table_exists: (bool,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{}' AND table_name = '_private_known_crontabs')",
         schema_name
-    ))
+    )))
     .fetch_one(&pool)
     .await?;
 
     assert!(table_exists.0, "Cron table should exist after worker initialization");
 
     // Clean up
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE",
+        schema_name
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
 
@@ -574,9 +580,12 @@ async fn test_multiple_cron_schedules() -> Result<()> {
 
     // Clean up
     let pool = PgPool::connect(&database_url).await?;
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE",
+        schema_name
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
 
@@ -612,9 +621,12 @@ async fn test_cron_with_payload() -> Result<()> {
 
     // Clean up
     let pool = PgPool::connect(&database_url).await?;
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE",
+        schema_name
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
 
@@ -649,13 +661,13 @@ async fn test_release_stale_queue_locks() -> Result<()> {
             "#,
             schema = schema
         );
-        sqlx::query(&stale_lock_query).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(stale_lock_query)).execute(pool).await?;
 
         // Verify the lock exists
-        let count_before: (i64,) = sqlx::query_as(&format!(
+        let count_before: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {schema}._private_job_queues WHERE locked_by = 'dead_worker_123'",
             schema = schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
         assert_eq!(count_before.0, 1, "Stale lock should exist before cleanup");
@@ -667,10 +679,10 @@ async fn test_release_stale_queue_locks() -> Result<()> {
         assert_eq!(released, 1, "Should have released 1 stale queue lock");
 
         // Verify the lock was released
-        let count_after: (i64,) = sqlx::query_as(&format!(
+        let count_after: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {schema}._private_job_queues WHERE locked_by = 'dead_worker_123'",
             schema = schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
         assert_eq!(count_after.0, 0, "Stale lock should be released after cleanup");
@@ -706,13 +718,16 @@ async fn test_release_stale_job_locks() -> Result<()> {
             "#,
             schema = schema
         );
-        sqlx::query(&stale_lock_query).bind(job_id).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(stale_lock_query))
+            .bind(job_id)
+            .execute(pool)
+            .await?;
 
         // Verify the lock exists
-        let locked_by: Option<String> = sqlx::query_scalar(&format!(
+        let locked_by: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
             schema = schema
-        ))
+        )))
         .bind(job_id)
         .fetch_one(pool)
         .await?;
@@ -729,10 +744,10 @@ async fn test_release_stale_job_locks() -> Result<()> {
         assert_eq!(released, 1, "Should have released 1 stale job lock");
 
         // Verify the lock was released
-        let locked_by_after: Option<String> = sqlx::query_scalar(&format!(
+        let locked_by_after: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
             schema = schema
-        ))
+        )))
         .bind(job_id)
         .fetch_one(pool)
         .await?;
@@ -769,7 +784,10 @@ async fn test_recent_locks_not_released() -> Result<()> {
             "#,
             schema = schema
         );
-        sqlx::query(&recent_lock_query).bind(job_id).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(recent_lock_query))
+            .bind(job_id)
+            .execute(pool)
+            .await?;
 
         // Run cleanup with a 30-minute timeout (should NOT release 1-minute-old lock)
         let released = client
@@ -778,10 +796,10 @@ async fn test_recent_locks_not_released() -> Result<()> {
         assert_eq!(released, 0, "Should NOT have released recent lock");
 
         // Verify the lock still exists
-        let locked_by: Option<String> = sqlx::query_scalar(&format!(
+        let locked_by: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
             schema = schema
-        ))
+        )))
         .bind(job_id)
         .fetch_one(pool)
         .await?;
@@ -822,7 +840,7 @@ async fn test_startup_cleanup_releases_both_lock_types() -> Result<()> {
             "#,
             schema = schema
         );
-        sqlx::query(&stale_queue_lock).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(stale_queue_lock)).execute(pool).await?;
 
         // Create a stale job lock
         let stale_job_lock = format!(
@@ -834,7 +852,10 @@ async fn test_startup_cleanup_releases_both_lock_types() -> Result<()> {
             "#,
             schema = schema
         );
-        sqlx::query(&stale_job_lock).bind(job_id).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(stale_job_lock))
+            .bind(job_id)
+            .execute(pool)
+            .await?;
 
         // Run startup cleanup
         let (queue_released, job_released, _failed_deleted) = client.startup_cleanup().await?;
@@ -843,18 +864,18 @@ async fn test_startup_cleanup_releases_both_lock_types() -> Result<()> {
         assert_eq!(job_released, 1, "Should have released 1 stale job lock");
 
         // Verify both locks were released
-        let queue_lock_count: (i64,) = sqlx::query_as(&format!(
+        let queue_lock_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {schema}._private_job_queues WHERE locked_by = 'crashed_worker'",
             schema = schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
         assert_eq!(queue_lock_count.0, 0, "Queue lock should be released");
 
-        let job_locked_by: Option<String> = sqlx::query_scalar(&format!(
+        let job_locked_by: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT locked_by FROM {schema}._private_jobs WHERE id = $1",
             schema = schema
-        ))
+        )))
         .bind(job_id)
         .fetch_one(pool)
         .await?;
@@ -897,19 +918,19 @@ async fn test_worker_crash_recovery_through_startup() -> Result<()> {
         let job_id = *job.id();
 
         // Simulate a crashed worker holding the lock for an hour.
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE {schema}._private_jobs \
              SET locked_at = NOW() - INTERVAL '1 hour', locked_by = 'crashed_worker' \
              WHERE id = $1"
-        ))
+        )))
         .bind(job_id)
         .execute(client.pool())
         .await?;
 
         // Sanity check — the job is locked.
-        let locked: (i64,) = sqlx::query_as(&format!(
+        let locked: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {schema}._private_jobs WHERE locked_at IS NOT NULL"
-        ))
+        )))
         .fetch_one(client.pool())
         .await?;
         assert_eq!(locked.0, 1, "job should be locked before recovery starts");
@@ -936,9 +957,11 @@ async fn test_worker_crash_recovery_through_startup() -> Result<()> {
         let mut recovered = false;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            let remaining: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {schema}._private_jobs"))
-                .fetch_one(client.pool())
-                .await?;
+            let remaining: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {schema}._private_jobs"
+            )))
+            .fetch_one(client.pool())
+            .await?;
             if remaining.0 == 0 {
                 recovered = true;
                 break;
@@ -948,9 +971,9 @@ async fn test_worker_crash_recovery_through_startup() -> Result<()> {
 
         // Pull diagnostic state if we didn't recover, then cancel.
         type JobDiagRow = (i16, i16, Option<chrono::DateTime<chrono::Utc>>, Option<String>);
-        let final_state: Option<JobDiagRow> = sqlx::query_as(&format!(
+        let final_state: Option<JobDiagRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT attempts, max_attempts, locked_at, locked_by FROM {schema}._private_jobs LIMIT 1"
-        ))
+        )))
         .fetch_optional(client.pool())
         .await?;
 
@@ -988,10 +1011,10 @@ async fn test_parallel_jobs_have_no_queue_id() -> Result<()> {
 
         // Verify job_queue_id is NULL in the database
         let pool = client.pool();
-        let job_queue_id: Option<i64> = sqlx::query_scalar(&format!(
+        let job_queue_id: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT job_queue_id FROM {}.\"_private_jobs\" WHERE id = $1",
             client.schema()
-        ))
+        )))
         .bind(job.id())
         .fetch_one(pool)
         .await?;
@@ -1030,10 +1053,10 @@ async fn test_serial_jobs_have_queue_id() -> Result<()> {
 
         // Verify job_queue_id is NOT NULL in the database
         let pool = client.pool();
-        let job_queue_id: Option<i32> = sqlx::query_scalar(&format!(
+        let job_queue_id: Option<i32> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT job_queue_id FROM {}.\"_private_jobs\" WHERE id = $1",
             client.schema()
-        ))
+        )))
         .bind(job.id())
         .fetch_one(pool)
         .await?;
@@ -1041,10 +1064,10 @@ async fn test_serial_jobs_have_queue_id() -> Result<()> {
         let job_queue_id = job_queue_id.expect("Serial jobs must have a job_queue_id for serialization");
 
         // Also verify the queue row exists with correct name
-        let queue_name: String = sqlx::query_scalar(&format!(
+        let queue_name: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT queue_name FROM {}.\"_private_job_queues\" WHERE id = $1",
             client.schema()
-        ))
+        )))
         .bind(job_queue_id)
         .fetch_one(pool)
         .await?;
@@ -1074,10 +1097,10 @@ async fn test_parallel_jobs_no_queue_rows() -> Result<()> {
         }
 
         // Count how many jobs were created
-        let job_count: (i64,) = sqlx::query_as(&format!(
+        let job_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NULL",
             schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -1086,10 +1109,10 @@ async fn test_parallel_jobs_no_queue_rows() -> Result<()> {
         // Verify no queue rows were created for parallel jobs
         // (There might be other queues from setup, so we check specifically
         // for queue rows that have jobs pointing to them)
-        let queues_with_jobs: (i64,) = sqlx::query_as(&format!(
+        let queues_with_jobs: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(DISTINCT job_queue_id) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
             schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -1129,10 +1152,10 @@ async fn test_serial_jobs_share_queue_row() -> Result<()> {
         }
 
         // All jobs should reference the same queue row
-        let distinct_queue_ids: (i64,) = sqlx::query_as(&format!(
+        let distinct_queue_ids: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(DISTINCT job_queue_id) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
             schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -1142,7 +1165,7 @@ async fn test_serial_jobs_share_queue_row() -> Result<()> {
         );
 
         // Verify queue name is correct
-        let queue_name: String = sqlx::query_scalar(&format!(
+        let queue_name: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             r#"
             SELECT q.queue_name
             FROM {schema}."_private_job_queues" q
@@ -1150,7 +1173,7 @@ async fn test_serial_jobs_share_queue_row() -> Result<()> {
             LIMIT 1
             "#,
             schema = schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -1188,10 +1211,10 @@ async fn test_different_serial_queues_independent() -> Result<()> {
         }
 
         // Each should have its own queue row
-        let distinct_queue_ids: (i64,) = sqlx::query_as(&format!(
+        let distinct_queue_ids: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(DISTINCT job_queue_id) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
             schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -1201,7 +1224,7 @@ async fn test_different_serial_queues_independent() -> Result<()> {
         );
 
         // Verify all queue names exist
-        let queue_names: Vec<(String,)> = sqlx::query_as(&format!(
+        let queue_names: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             r#"
             SELECT DISTINCT q.queue_name
             FROM {schema}."_private_job_queues" q
@@ -1209,7 +1232,7 @@ async fn test_different_serial_queues_independent() -> Result<()> {
             ORDER BY q.queue_name
             "#,
             schema = schema
-        ))
+        )))
         .fetch_all(pool)
         .await?;
 
@@ -1247,7 +1270,7 @@ async fn test_serial_for_per_entity_queues() -> Result<()> {
         }
 
         // Each user should have their own queue
-        let queue_names: Vec<(String,)> = sqlx::query_as(&format!(
+        let queue_names: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             r#"
             SELECT DISTINCT q.queue_name
             FROM {schema}."_private_job_queues" q
@@ -1255,7 +1278,7 @@ async fn test_serial_for_per_entity_queues() -> Result<()> {
             ORDER BY q.queue_name
             "#,
             schema = schema
-        ))
+        )))
         .fetch_all(pool)
         .await?;
 
@@ -1302,18 +1325,18 @@ async fn test_mixed_parallel_and_serial_jobs() -> Result<()> {
         }
 
         // Count parallel jobs (NULL job_queue_id)
-        let parallel_count: (i64,) = sqlx::query_as(&format!(
+        let parallel_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NULL",
             schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
         // Count serial jobs (non-NULL job_queue_id)
-        let serial_count: (i64,) = sqlx::query_as(&format!(
+        let serial_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE job_queue_id IS NOT NULL",
             schema
-        ))
+        )))
         .fetch_one(pool)
         .await?;
 
@@ -1377,9 +1400,12 @@ async fn test_concurrent_enqueue_under_load() -> Result<()> {
         assert_eq!(total_enqueued, TOTAL, "every concurrent enqueue must succeed");
 
         // Verify every row landed in _private_jobs.
-        let row_count: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
-            .fetch_one(client.pool())
-            .await?;
+        let row_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {}._private_jobs",
+            client.schema()
+        )))
+        .fetch_one(client.pool())
+        .await?;
         assert_eq!(
             row_count.0 as usize, TOTAL,
             "all {} jobs must be persisted in _private_jobs",

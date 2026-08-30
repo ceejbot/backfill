@@ -10,10 +10,31 @@ _help:
 # Docker-based Testing (recommended)
 # --------------------------------------------------------------------------
 
-# Start the test database container
+# Start the test database container, or reuse one that's already healthy.
+# Fails if localhost:5433 is taken by something that is not this stack.
 db-up:
-	docker compose up -d --wait
-	@echo "PostgreSQL ready at localhost:5433"
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if docker compose exec -T postgres pg_isready -U backfill -d backfill_test >/dev/null 2>&1; then
+		echo "Reusing running test Postgres on localhost:5433"
+		exit 0
+	fi
+	if nc -z localhost 5433 >/dev/null 2>&1; then
+		echo "localhost:5433 is in use, but this project's test Postgres is not healthy." >&2
+		echo "Stop the other listener, or run: just db-down" >&2
+		exit 1
+	fi
+	docker compose up -d
+	for _ in $(seq 1 30); do
+		if docker compose exec -T postgres pg_isready -U backfill -d backfill_test >/dev/null 2>&1; then
+			echo "PostgreSQL ready at localhost:5433"
+			exit 0
+		fi
+		sleep 1
+	done
+	echo "Test Postgres did not become ready on localhost:5433" >&2
+	docker compose logs postgres >&2 || true
+	exit 1
 
 # Stop the test database container
 db-down:

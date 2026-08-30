@@ -8,12 +8,17 @@ use sqlx::postgres::PgPoolOptions;
 use super::BackfillClient;
 use crate::{BackfillError, EnqueueOutcome, JobSpec};
 
-/// Check if a GraphileWorkerError is a RowNotFound error.
-/// This happens when add_job returns NULL because a job with the same
-/// job_key is currently locked by a worker.
+/// True when add_job returned no row because a job with the same `job_key`
+/// is currently locked by a worker.
+///
+/// graphile_worker 0.13 wraps that empty result in `DbError` ("query returned
+/// no rows…") instead of `sqlx::Error::RowNotFound`.
 fn is_row_not_found(e: &graphile_worker::errors::GraphileWorkerError) -> bool {
     use graphile_worker::errors::GraphileWorkerError;
-    matches!(e, GraphileWorkerError::SqlError(sqlx::Error::RowNotFound))
+    match e {
+        GraphileWorkerError::SqlError(db_err) => db_err.to_string().contains("query returned no rows"),
+        _ => false,
+    }
 }
 
 impl BackfillClient {

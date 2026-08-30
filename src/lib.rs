@@ -139,7 +139,10 @@ mod errors;
 mod permanent_failure_plugin;
 mod priorities;
 mod retries;
+mod sql;
 mod worker;
+
+pub(crate) use sql::audited_sql;
 
 #[cfg(feature = "axum")]
 pub mod admin;

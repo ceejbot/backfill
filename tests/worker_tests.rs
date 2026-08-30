@@ -273,17 +273,17 @@ async fn test_worker_runner_process_available_jobs() -> Result<(), BackfillError
 
     // Verify jobs were actually processed by checking the database
     // Jobs should be completed and removed from the queue
-    let remaining: (i64,) = sqlx::query_as(&format!(
+    let remaining: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE is_available = true",
         schema
-    ))
+    )))
     .fetch_one(client.pool())
     .await?;
 
     assert_eq!(remaining.0, 0, "All jobs should have been processed");
 
     // Clean up schema
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", schema)))
         .execute(client.pool())
         .await?;
 
@@ -374,7 +374,7 @@ async fn test_parallel_jobs_concurrent_locking() -> Result<(), BackfillError> {
 
     // Simulate locking all 3 jobs with different worker IDs
     // This mimics what graphile_worker does when fetching jobs
-    let locked_count: (i64,) = sqlx::query_as(&format!(
+    let locked_count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         WITH locked AS (
             UPDATE {schema}."_private_jobs"
@@ -390,14 +390,14 @@ async fn test_parallel_jobs_concurrent_locking() -> Result<(), BackfillError> {
         SELECT COUNT(*) FROM locked
         "#,
         schema = schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
     assert_eq!(locked_count.0, 1, "Should lock first parallel job");
 
     // Lock second job with different worker
-    let locked_count2: (i64,) = sqlx::query_as(&format!(
+    let locked_count2: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         WITH locked AS (
             UPDATE {schema}."_private_jobs"
@@ -413,14 +413,14 @@ async fn test_parallel_jobs_concurrent_locking() -> Result<(), BackfillError> {
         SELECT COUNT(*) FROM locked
         "#,
         schema = schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
     assert_eq!(locked_count2.0, 1, "Should lock second parallel job concurrently");
 
     // Lock third job with different worker
-    let locked_count3: (i64,) = sqlx::query_as(&format!(
+    let locked_count3: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         WITH locked AS (
             UPDATE {schema}."_private_jobs"
@@ -436,24 +436,24 @@ async fn test_parallel_jobs_concurrent_locking() -> Result<(), BackfillError> {
         SELECT COUNT(*) FROM locked
         "#,
         schema = schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
     assert_eq!(locked_count3.0, 1, "Should lock third parallel job concurrently");
 
     // Verify all 3 are locked simultaneously
-    let total_locked: (i64,) = sqlx::query_as(&format!(
+    let total_locked: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM {}.\"_private_jobs\" WHERE locked_at IS NOT NULL",
         schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
     assert_eq!(total_locked.0, 3, "All 3 parallel jobs should be locked simultaneously");
 
     // Clean up
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", schema)))
         .execute(pool)
         .await?;
 
@@ -498,24 +498,24 @@ async fn test_serial_jobs_queue_locking() -> Result<(), BackfillError> {
     }
 
     // Get the queue ID
-    let queue_id: i32 = sqlx::query_scalar(&format!(
+    let queue_id: i32 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT id FROM {}.\"_private_job_queues\" WHERE queue_name = 'serial-queue'",
         schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
     // Lock the queue (simulating first worker acquiring it)
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE {}.\"_private_job_queues\" SET locked_at = NOW(), locked_by = 'test_worker_1' WHERE id = $1",
         schema
-    ))
+    )))
     .bind(queue_id)
     .execute(pool)
     .await?;
 
     // Lock the first job
-    let first_job_locked: (i64,) = sqlx::query_as(&format!(
+    let first_job_locked: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         WITH locked AS (
             UPDATE {schema}."_private_jobs"
@@ -531,7 +531,7 @@ async fn test_serial_jobs_queue_locking() -> Result<(), BackfillError> {
         SELECT COUNT(*) FROM locked
         "#,
         schema = schema
-    ))
+    )))
     .bind(queue_id)
     .fetch_one(pool)
     .await?;
@@ -540,7 +540,7 @@ async fn test_serial_jobs_queue_locking() -> Result<(), BackfillError> {
 
     // Now try to fetch another job from the same queue with a different worker
     // This should fail because the queue is locked (SKIP LOCKED will skip it)
-    let second_fetch: (i64,) = sqlx::query_as(&format!(
+    let second_fetch: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT COUNT(*) FROM {schema}."_private_jobs" j
         WHERE j.is_available = true
@@ -551,7 +551,7 @@ async fn test_serial_jobs_queue_locking() -> Result<(), BackfillError> {
           )
         "#,
         schema = schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
@@ -561,10 +561,10 @@ async fn test_serial_jobs_queue_locking() -> Result<(), BackfillError> {
     );
 
     // Verify queue is locked
-    let queue_locked: Option<String> = sqlx::query_scalar(&format!(
+    let queue_locked: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT locked_by FROM {}.\"_private_job_queues\" WHERE id = $1",
         schema
-    ))
+    )))
     .bind(queue_id)
     .fetch_one(pool)
     .await?;
@@ -576,7 +576,7 @@ async fn test_serial_jobs_queue_locking() -> Result<(), BackfillError> {
     );
 
     // Clean up
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", schema)))
         .execute(pool)
         .await?;
 
@@ -620,43 +620,43 @@ async fn test_different_serial_queues_independent() -> Result<(), BackfillError>
     }
 
     // Lock queue-a
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE {}.\"_private_job_queues\" SET locked_at = NOW(), locked_by = 'worker_a' WHERE queue_name = 'queue-a'",
         schema
-    ))
+    )))
     .execute(pool)
     .await?;
 
     // Lock queue-b
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE {}.\"_private_job_queues\" SET locked_at = NOW(), locked_by = 'worker_b' WHERE queue_name = 'queue-b'",
         schema
-    ))
+    )))
     .execute(pool)
     .await?;
 
     // Queue-c should still be available
-    let available_queues: (i64,) = sqlx::query_as(&format!(
+    let available_queues: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM {}.\"_private_job_queues\" WHERE locked_at IS NULL",
         schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
     assert_eq!(available_queues.0, 1, "Queue-c should still be available");
 
     // Verify queue-c is the unlocked one
-    let unlocked_queue: String = sqlx::query_scalar(&format!(
+    let unlocked_queue: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT queue_name FROM {}.\"_private_job_queues\" WHERE locked_at IS NULL",
         schema
-    ))
+    )))
     .fetch_one(pool)
     .await?;
 
     assert_eq!(unlocked_queue, "queue-c");
 
     // Clean up
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", schema)))
         .execute(pool)
         .await?;
 

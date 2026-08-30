@@ -42,7 +42,7 @@ where
     let result = test_fn(client).await;
     
     // Clean up: drop the test schema
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name)))
         .execute(&pool)
         .await?;
         

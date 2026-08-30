@@ -182,7 +182,9 @@ impl BackfillClient {
             self.schema
         );
 
-        sqlx::query(&create_table_query).execute(&self.pool).await?;
+        sqlx::query(crate::audited_sql(create_table_query))
+            .execute(&self.pool)
+            .await?;
 
         // Create indexes separately
         let indexes = vec![
@@ -211,7 +213,7 @@ impl BackfillClient {
         ];
 
         for index_query in indexes {
-            sqlx::query(&index_query).execute(&self.pool).await?;
+            sqlx::query(crate::audited_sql(index_query)).execute(&self.pool).await?;
         }
 
         Ok(())
@@ -305,7 +307,10 @@ impl BackfillClient {
             self.schema
         );
 
-        let row = sqlx::query(&query).bind(dlq_id).fetch_optional(&self.pool).await?;
+        let row = sqlx::query(crate::audited_sql(query))
+            .bind(dlq_id)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(row.map(|row| {
             let job = DlqJob::from_row(&row);
@@ -397,7 +402,7 @@ impl BackfillClient {
         // Bookkeeping update — see function docstring. If this fails, the
         // job has already been re-enqueued; we return success but log so an
         // operator can see that the DLQ row's counters didn't advance.
-        if let Err(e) = sqlx::query(&update_query)
+        if let Err(e) = sqlx::query(crate::audited_sql(update_query))
             .bind(&notes)
             .bind(dlq_id)
             .execute(&self.pool)
@@ -425,7 +430,7 @@ impl BackfillClient {
             "DELETE FROM {}.backfill_dlq WHERE id = $1 RETURNING task_identifier",
             self.schema
         );
-        let task_identifier: Option<String> = sqlx::query_scalar(&query)
+        let task_identifier: Option<String> = sqlx::query_scalar(crate::audited_sql(query))
             .bind(dlq_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -447,7 +452,10 @@ impl BackfillClient {
     /// Returns the number of entries deleted.
     pub async fn delete_dlq_by_job_key(&self, job_key: &str) -> Result<u64, BackfillError> {
         let query = format!("DELETE FROM {}.backfill_dlq WHERE job_key = $1", self.schema);
-        let result = sqlx::query(&query).bind(job_key).execute(&self.pool).await?;
+        let result = sqlx::query(crate::audited_sql(query))
+            .bind(job_key)
+            .execute(&self.pool)
+            .await?;
 
         let deleted = result.rows_affected();
 
@@ -480,7 +488,7 @@ impl BackfillClient {
             self.schema
         );
 
-        let row = sqlx::query(&query).fetch_one(&self.pool).await?;
+        let row = sqlx::query(crate::audited_sql(query)).fetch_one(&self.pool).await?;
 
         let task_breakdown_query = format!(
             r#"
@@ -493,7 +501,9 @@ impl BackfillClient {
             self.schema
         );
 
-        let task_rows = sqlx::query(&task_breakdown_query).fetch_all(&self.pool).await?;
+        let task_rows = sqlx::query(crate::audited_sql(task_breakdown_query))
+            .fetch_all(&self.pool)
+            .await?;
 
         let task_breakdown: Vec<(String, u32)> = task_rows
             .into_iter()
@@ -540,7 +550,7 @@ impl BackfillClient {
                 "SELECT queue_name FROM {}._private_job_queues WHERE id = $1",
                 self.schema
             );
-            sqlx::query_scalar::<_, String>(&query)
+            sqlx::query_scalar::<_, String>(crate::audited_sql(query))
                 .bind(queue_id)
                 .fetch_optional(&self.pool)
                 .await?
@@ -577,7 +587,7 @@ impl BackfillClient {
             schema = self.schema
         );
 
-        let row = sqlx::query(&upsert_query)
+        let row = sqlx::query(crate::audited_sql(upsert_query))
             .bind(original_job.id())
             .bind(original_job.task_identifier())
             .bind(original_job.payload())
@@ -652,7 +662,9 @@ impl BackfillClient {
             schema = self.schema
         );
 
-        let failed_jobs = sqlx::query(&find_failed_jobs_query).fetch_all(&self.pool).await?;
+        let failed_jobs = sqlx::query(crate::audited_sql(find_failed_jobs_query))
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut moved_count = 0;
 
@@ -710,7 +722,7 @@ impl BackfillClient {
 
             let failure_reason = format!("Job exceeded maximum retry attempts ({}/{})", attempts, max_attempts);
 
-            let move_result = sqlx::query(&move_query)
+            let move_result = sqlx::query(crate::audited_sql(move_query))
                 .bind(job_id)
                 .bind(&task_identifier)
                 .bind(&payload)

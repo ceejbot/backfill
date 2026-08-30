@@ -47,9 +47,12 @@ where
     let result = test_fn(client).await;
 
     // Cleanup
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
-        .execute(&pool)
-        .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE",
+        schema_name
+    )))
+    .execute(&pool)
+    .await?;
 
     pool.close().await;
 
@@ -524,22 +527,22 @@ async fn test_retry_to_exhaustion_then_dlq_via_worker() -> Result<()> {
         const MAX_ITERATIONS: usize = 10;
         let mut exhausted = false;
         for _ in 0..MAX_ITERATIONS {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE {}._private_jobs \
                  SET run_at = NOW() \
                  WHERE locked_at IS NULL AND attempts < max_attempts",
                 client.schema()
-            ))
+            )))
             .execute(client.pool())
             .await?;
 
             worker.process_available_jobs().await?;
 
             // Check if attempts hit max_attempts.
-            let row: Option<(i16, i16)> = sqlx::query_as(&format!(
+            let row: Option<(i16, i16)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "SELECT attempts, max_attempts FROM {}._private_jobs LIMIT 1",
                 client.schema()
-            ))
+            )))
             .fetch_optional(client.pool())
             .await?;
             if let Some((attempts, max_attempts)) = row
@@ -569,9 +572,12 @@ async fn test_retry_to_exhaustion_then_dlq_via_worker() -> Result<()> {
 
         // The original job row should be gone from _private_jobs (the DLQ
         // move's atomic CTE deleted it — P1-2).
-        let count: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
-            .fetch_one(client.pool())
-            .await?;
+        let count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {}._private_jobs",
+            client.schema()
+        )))
+        .fetch_one(client.pool())
+        .await?;
         assert_eq!(count.0, 0, "_private_jobs should be empty after DLQ move");
 
         Ok(())
@@ -622,10 +628,10 @@ async fn test_dlq_requeue_runs_to_completion_and_cleans_dlq() -> Result<()> {
         let job_id = *job.id();
 
         // Force the job into permanently-failed state.
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE {}._private_jobs SET attempts = max_attempts WHERE id = $1",
             client.schema()
-        ))
+        )))
         .bind(job_id)
         .execute(client.pool())
         .await?;
@@ -663,9 +669,12 @@ async fn test_dlq_requeue_runs_to_completion_and_cleans_dlq() -> Result<()> {
         worker.process_available_jobs().await?;
 
         // Main queue empty — job ran.
-        let main: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
-            .fetch_one(client.pool())
-            .await?;
+        let main: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {}._private_jobs",
+            client.schema()
+        )))
+        .fetch_one(client.pool())
+        .await?;
         assert_eq!(main.0, 0, "requeued job should have run to completion");
 
         // DLQ empty — DlqCleanupPlugin removed the entry on JobComplete.
@@ -723,21 +732,24 @@ async fn test_retry_then_eventual_success() -> Result<()> {
         const MAX_ITERATIONS: usize = 10;
         let mut succeeded = false;
         for _ in 0..MAX_ITERATIONS {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE {}._private_jobs \
                  SET run_at = NOW() \
                  WHERE locked_at IS NULL AND attempts < max_attempts",
                 client.schema()
-            ))
+            )))
             .execute(client.pool())
             .await?;
 
             worker.process_available_jobs().await?;
 
             // Successful completion deletes the row.
-            let remaining: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}._private_jobs", client.schema()))
-                .fetch_one(client.pool())
-                .await?;
+            let remaining: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {}._private_jobs",
+                client.schema()
+            )))
+            .fetch_one(client.pool())
+            .await?;
             if remaining.0 == 0 {
                 succeeded = true;
                 break;
@@ -818,10 +830,10 @@ async fn test_non_retryable_error_short_circuits_retries() -> Result<()> {
 
         // Verify: attempts hit max_attempts after a single execution rather
         // than incrementing by one per retry.
-        let row: (i16, i16) = sqlx::query_as(&format!(
+        let row: (i16, i16) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT attempts, max_attempts FROM {}._private_jobs LIMIT 1",
             client.schema()
-        ))
+        )))
         .fetch_one(client.pool())
         .await?;
         let (attempts, max_attempts) = row;
@@ -883,10 +895,10 @@ async fn test_retryable_error_does_not_short_circuit() -> Result<()> {
 
         worker.process_available_jobs().await?;
 
-        let (attempts, max_attempts): (i16, i16) = sqlx::query_as(&format!(
+        let (attempts, max_attempts): (i16, i16) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT attempts, max_attempts FROM {}._private_jobs LIMIT 1",
             client.schema()
-        ))
+        )))
         .fetch_one(client.pool())
         .await?;
         assert_eq!(

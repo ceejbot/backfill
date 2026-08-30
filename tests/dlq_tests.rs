@@ -235,10 +235,10 @@ async fn test_process_failed_jobs_preserves_payload() {
     let job = outcome.unwrap();
 
     // Simulate job failure by updating attempts to match max_attempts
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE {}._private_jobs SET attempts = max_attempts WHERE id = $1",
         client.schema()
-    ))
+    )))
     .bind(job.id())
     .execute(client.pool())
     .await
@@ -902,10 +902,10 @@ async fn test_worker_startup_moves_failed_jobs_to_dlq_before_cleanup() {
 
     // Force `attempts = max_attempts` to simulate a job that exhausted retries
     // before the previous worker shut down.
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE {}._private_jobs SET attempts = max_attempts WHERE id = $1",
         schema
-    ))
+    )))
     .bind(job_id)
     .execute(&pool)
     .await
@@ -950,7 +950,7 @@ async fn test_worker_startup_moves_failed_jobs_to_dlq_before_cleanup() {
     assert_eq!(dlq_job.task_identifier, "test_job");
 
     // Cleanup
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema))
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA IF EXISTS {} CASCADE", schema)))
         .execute(&pool)
         .await
         .ok();

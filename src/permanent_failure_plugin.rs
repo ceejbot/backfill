@@ -17,19 +17,13 @@
 //! `_private_jobs` forever — pointless and confusing — so the gating is
 //! intentional.
 //!
-//! # Implementation note: why we can't use `permanently_fail_jobs`
+//! # Implementation note: hook order in graphile_worker 0.13
 //!
-//! graphile_worker exposes a `permanently_fail_jobs(job_ids, reason)` SQL
-//! function that does what we want, but it has a `WHERE locked_at IS NULL OR
-//! locked_at < NOW() - 4h` guard to prevent racing with an active worker.
-//! Inside the `JobFail` hook the worker (us) still owns the lock —
-//! graphile_worker doesn't clear `locked_at` until `fail_job` runs *after*
-//! our hook returns. So `permanently_fail_jobs` would silently no-op.
-//!
-//! We work around this with a direct UPDATE that filters by `locked_by =
-//! ctx.worker_id` instead of the `locked_at IS NULL` guard. Same safety
-//! property (only this worker can update its own row) but compatible with
-//! the in-flight lock state.
+//! `fail_job` runs *before* `JobFail` is emitted, and it already clears
+//! `locked_at` / `locked_by`. The UPDATE therefore matches unlocked rows
+//! (`locked_at IS NULL`) rather than the in-flight lock. `attempts <
+//! max_attempts` keeps us from touching a row another worker already
+//! claimed.
 
 use graphile_worker::{HookRegistry, JobFail, JobFailContext, Plugin};
 
@@ -67,28 +61,21 @@ impl Plugin for PermanentFailurePlugin {
                 let task = ctx.job.task_identifier().to_string();
 
                 // Set attempts = max_attempts so the next `get_job()` doesn't
-                // pick this up (its predicate is `is_available`, which is a
-                // generated column = `locked_at IS NULL AND attempts <
-                // max_attempts`). The next DLQ processor tick will scan this
-                // row and move it to the DLQ.
-                //
-                // We filter by `locked_by = $3` to ensure we only mutate the
-                // row while we still own its lock. graphile_worker's
-                // `fail_job` will run immediately after this hook returns and
-                // will clear locked_at; the `attempts = max_attempts` we
-                // wrote here will persist (fail_job doesn't touch attempts).
+                // pick this up (`is_available` is `locked_at IS NULL AND
+                // attempts < max_attempts`). The next DLQ tick then moves
+                // the row. fail_job already ran and unlocked the row; it
+                // does not touch attempts.
                 let sql = format!(
                     "UPDATE {schema}._private_jobs \
                      SET attempts = max_attempts, last_error = $2, updated_at = now() \
-                     WHERE id = $1 AND locked_by = $3",
+                     WHERE id = $1 AND locked_at IS NULL AND attempts < max_attempts",
                     schema = client.schema()
                 );
                 let reason = format!("Permanent failure (non-retryable error): {}", ctx.error);
 
-                match sqlx::query(&sql)
+                match sqlx::query(crate::audited_sql(sql))
                     .bind(job_id)
                     .bind(&reason)
-                    .bind(&ctx.worker_id)
                     .execute(client.pool())
                     .await
                 {

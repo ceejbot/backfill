@@ -105,7 +105,7 @@ async fn get_queue_stats(
         schema, schema
     );
 
-    let pending_jobs = sqlx::query_scalar::<_, i64>(&pending_query)
+    let pending_jobs = sqlx::query_scalar::<_, i64>(crate::audited_sql(pending_query))
         .bind(queue_name)
         .fetch_one(pool)
         .await
@@ -128,7 +128,7 @@ async fn get_queue_stats(
         schema, schema
     );
 
-    let active_jobs = sqlx::query_scalar::<_, i64>(&active_query)
+    let active_jobs = sqlx::query_scalar::<_, i64>(crate::audited_sql(active_query))
         .bind(queue_name)
         .fetch_one(pool)
         .await
@@ -152,7 +152,7 @@ async fn get_queue_stats(
         schema, schema
     );
 
-    let failed_jobs = sqlx::query_scalar::<_, i64>(&failed_query)
+    let failed_jobs = sqlx::query_scalar::<_, i64>(crate::audited_sql(failed_query))
         .bind(queue_name)
         .fetch_one(pool)
         .await
@@ -179,7 +179,7 @@ async fn get_all_queue_names(pool: &sqlx::PgPool, schema: &str) -> Result<Vec<St
         schema
     );
 
-    let queue_names = sqlx::query_scalar::<_, String>(&query)
+    let queue_names = sqlx::query_scalar::<_, String>(crate::audited_sql(query))
         .fetch_all(pool)
         .await
         .map_err(|e| {
@@ -195,7 +195,7 @@ async fn get_all_queue_names(pool: &sqlx::PgPool, schema: &str) -> Result<Vec<St
         schema
     );
 
-    let has_default_jobs = sqlx::query_scalar::<_, bool>(&has_default_jobs_query)
+    let has_default_jobs = sqlx::query_scalar::<_, bool>(crate::audited_sql(has_default_jobs_query))
         .fetch_one(pool)
         .await
         .map_err(|e| {
@@ -1098,16 +1098,19 @@ where
         schema
     );
 
-    let queue_locks: Vec<QueueLockRow> = sqlx::query_as(&queue_locks_query).fetch_all(pool).await.map_err(|e| {
-        error!("Failed to query queue locks: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(
-                format!("Failed to query queue locks: {}", e),
-                "QUERY_ERROR",
-            )),
-        )
-    })?;
+    let queue_locks: Vec<QueueLockRow> = sqlx::query_as(crate::audited_sql(queue_locks_query))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            error!("Failed to query queue locks: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(
+                    format!("Failed to query queue locks: {}", e),
+                    "QUERY_ERROR",
+                )),
+            )
+        })?;
 
     // Query job locks (with task identifier)
     let job_locks_query = format!(
@@ -1129,16 +1132,19 @@ where
         schema, schema
     );
 
-    let job_locks: Vec<JobLockRow> = sqlx::query_as(&job_locks_query).fetch_all(pool).await.map_err(|e| {
-        error!("Failed to query job locks: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(
-                format!("Failed to query job locks: {}", e),
-                "QUERY_ERROR",
-            )),
-        )
-    })?;
+    let job_locks: Vec<JobLockRow> = sqlx::query_as(crate::audited_sql(job_locks_query))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            error!("Failed to query job locks: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(
+                    format!("Failed to query job locks: {}", e),
+                    "QUERY_ERROR",
+                )),
+            )
+        })?;
 
     // Convert to response types
     let queue_lock_infos: Vec<QueueLockInfo> = queue_locks
@@ -1239,35 +1245,44 @@ where
             schema,
             queue_lock_timeout.as_secs()
         );
-        let queue_count: (i64,) = sqlx::query_as(&queue_count_query).fetch_one(pool).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
-            )
-        })?;
+        let queue_count: (i64,) = sqlx::query_as(crate::audited_sql(queue_count_query))
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
+                )
+            })?;
 
         let job_count_query = format!(
             "SELECT COUNT(*) FROM {}._private_jobs WHERE locked_at IS NOT NULL AND locked_at < NOW() - INTERVAL '{} seconds'",
             schema,
             job_lock_timeout.as_secs()
         );
-        let job_count: (i64,) = sqlx::query_as(&job_count_query).fetch_one(pool).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
-            )
-        })?;
+        let job_count: (i64,) = sqlx::query_as(crate::audited_sql(job_count_query))
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
+                )
+            })?;
 
         let failed_count_query = format!(
             "SELECT COUNT(*) FROM {}._private_jobs WHERE attempts >= max_attempts AND locked_at IS NULL",
             schema
         );
-        let failed_count: (i64,) = sqlx::query_as(&failed_count_query).fetch_one(pool).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
-            )
-        })?;
+        let failed_count: (i64,) = sqlx::query_as(crate::audited_sql(failed_count_query))
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new(format!("Query failed: {}", e), "QUERY_ERROR")),
+                )
+            })?;
 
         info!(
             "Lock cleanup dry run: would release {} queue locks, {} job locks, delete {} failed jobs",

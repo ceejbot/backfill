@@ -358,7 +358,7 @@ impl From<WorkerOptionsBuilder> for WorkerOptions {
         // Add all cron schedules
         for crontab_spec in builder.crontabs {
             worker_options = worker_options
-                .with_crontab(&crontab_spec)
+                .with_cron(&crontab_spec)
                 .expect("Crontab already validated in add_cron_schedule");
         }
 
